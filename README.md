@@ -12,8 +12,12 @@ filesystem **skill** provider and the Claude-Code **hooks bridge**.
 - **One command everything:** ~72 `gsd-*` skills (`/gsd-health`, `/gsd-new-project`,
   `/gsd-plan-phase`, `/gsd-execute-phase`, …), the GSD engine payload, hook scripts, the
   hooks-bridge profile patch, and optionally the global `gsd_run` CLI.
-- **Version-pinned and idempotent:** upgrade and rollback are the same command with a different
-  `GSD_VERSION`. The fetched version is cross-checked against the requested one.
+- **Version-pinned and idempotent:** `GSD_VERSION` is required for online installs (a `v`
+  prefix is tolerated, and the fetched version is cross-checked against the requested one).
+  Upgrade and rollback are the same command with a different version number.
+- **No partial upgrades:** re-running over an existing deployment is detected as upgrade mode
+  and always refreshes the full surface — the hooks patch and the global CLI are enabled
+  automatically.
 - **Safe:** `--uninstall` removes only what the script itself manages and never touches your
   other `~/.dsh` content; install refuses to overwrite directories it does not manage.
 - **Supported:** macOS, Linux, WSL (bash). Native Windows is not supported.
@@ -35,7 +39,8 @@ curl -fsSL https://raw.githubusercontent.com/pfmiles/install-gsd-dsh/main/instal
 chmod +x install-gsd-dsh.sh
 
 # 2) Install: skills + engine + hook files + hooks-bridge patch + global CLI
-bash install-gsd-dsh.sh --with-ghooks --npm-bin
+#    GSD_VERSION pins the release (required while online); "v1.16.0" also works.
+GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin
 
 # 3) Restart DSH (dsh web). Skill discovery hot-reloads in running sessions,
 #    but the hooks bridge is mounted at process startup and needs a restart.
@@ -85,11 +90,15 @@ The script **never** touches: `~/.claude`, your project files, the rest of your 
 | `--uninstall` | Remove everything this script deployed (only its own managed files, see *Uninstall*) |
 | `-h` / `--help` | Usage |
 
+When an existing deployment is detected, the run is treated as an **upgrade**: `--with-ghooks`
+and `--npm-bin` are switched on automatically (no flag can disable them), so the hooks patch,
+bridge config and the `gsd_run` CLI always move together with the engine.
+
 ### Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GSD_VERSION` | `1.16.0` | GSD Core version tag to install; the script verifies the fetched version matches it |
+| `GSD_VERSION` | *(required online)* | GSD Core version tag to install. **Required for online installs** — the script refuses to guess, so a bare re-run can never silently roll a machine back to a default. A leading `v` is tolerated; the fetched version is cross-checked against the requested one. Offline installs (`GSD_PACKAGE_DIR`) may omit it and inherit the package's version |
 | `DSH_HOME` | `~/.dsh` | DSH data root. **Must match the home your DSH actually uses** (DSH resolution: explicit config → `$DSH_HOME` → `~/.dsh`) |
 | `GSD_PACKAGE_DIR` | *(empty)* | Offline mode: an unpacked npm-layout directory (`package.json` + `bin/install.js`, e.g. an unpacked `npm pack` artifact). Fully offline once set. **A bare git clone is not accepted** (it needs `npm install && npm run build:lib` first) |
 | `GSD_PROFILE` | *(empty)* | Skill profile passed to the official installer: `core` / `standard` / `full`. Fewer skills = fewer tokens injected per session; use `core` in token-sensitive setups |
@@ -109,8 +118,12 @@ GSD_VERSION=1.17.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin
 GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin
 ```
 
+- `GSD_VERSION` must be set explicitly — the script never defaults it. A leading `v` is fine
+  (`v1.17.0`).
 - Re-running is idempotent: the deployment surface is rebuilt and the profile patch is never
-  appended twice.
+  appended twice. Running over an existing deployment is upgrade mode and always refreshes the
+  full surface — the hooks patch and the global CLI are refreshed automatically even if you omit
+  `--with-ghooks` / `--npm-bin`.
 - **Offline:** on an internet-connected machine run
   `npm pack @opengsd/gsd-core@1.17.0`, unpack the tarball, copy it to the target machine, then:
   `GSD_PACKAGE_DIR=<unpacked dir> bash install-gsd-dsh.sh --npm-bin`.
@@ -141,8 +154,9 @@ hard-blocks, commit-convention validation, and more.
 
 ## How it works
 
-1. **Fetch** `@opengsd/gsd-core@<GSD_VERSION>` from npm — or use `GSD_PACKAGE_DIR` for offline —
-   and verify the fetched version equals the requested one.
+1. **Fetch** `@opengsd/gsd-core@<GSD_VERSION>` from npm (`GSD_VERSION` is required online and a
+   `v` prefix is normalized) — or use `GSD_PACKAGE_DIR` for offline — and verify the fetched
+   version equals the requested one.
 2. **Stage** using the official installer's `--claude --global` passthrough into a throwaway
    `CLAUDE_CONFIG_DIR` (flat skills + engine payload + hook scripts, internal path references
    rewritten to the staging root).
@@ -217,6 +231,8 @@ bash install-gsd-dsh.sh --uninstall
 | Symptom | Fix |
 |---|---|
 | `ERROR: GSD v1.16+ requires Node >= 24` | Upgrade Node, or install an older tag: `GSD_VERSION=1.15.0 bash install-gsd-dsh.sh` |
+| `ERROR: GSD_VERSION is required for online installs` | Pin the version: `GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin` (offline installs may omit it with `GSD_PACKAGE_DIR`) |
+| `ERROR: invalid GSD_VERSION '…'` | Use a semver like `1.17.0`; `v1.17.0` and `1.17.0-rc.1` are also accepted |
 | Skills don't appear in the session | Confirm `DSH_HOME` matches the home DSH actually uses; confirm `skills/gsd-*` files are in place; reopen the session (skill directories hot-reload in running sessions) |
 | Typing `/gsd-*` does nothing | That is DSH's user-invocable skill mechanism; ensure the skill directory is visible (above) and your DSH version supports `/name` invocation |
 | `gsd_run` not found | Install with `--npm-bin`, or call `node $DSH_HOME/gsd-core/bin/gsd-tools.cjs` directly; the script prints an npm-prefix hint at the end |
