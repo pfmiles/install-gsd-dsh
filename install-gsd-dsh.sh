@@ -45,6 +45,10 @@
 #                           is not detected anywhere under $DSH_HOME/profiles
 #   GSD_ALLOW_OLD_NODE=1    proceed despite Node < 24 (engine may not run)
 #   GSD_NO_BRIDGE_SYNC=1    skip aligning the hooks bridge plugin to the DSH version
+#   GSD_HOOKS_SANDBOX_PATCH=1 host without a usable sandbox backend (no
+#                           bubblewrap/Landlock on Linux): patch the DSH
+#                           sandbox-policy default mode to danger-full-access
+#                           so hooks do not all fail open (see README §Hooks)
 set -euo pipefail
 
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
@@ -139,6 +143,22 @@ bridge_version() {
   return 1
 }
 
+# Can this host enforce DSH's confined sandbox modes? Hooks run through
+# ctx.shell under the DEPLOYMENT default mode (sandbox-policy config:
+# process.env.DSH_PERMISSION_MODE ?? 'workspace-write'). On Linux the confined
+# path needs bubblewrap or a Landlock-enabled kernel; without either, every
+# guard hook dies with SANDBOX_UNAVAILABLE and the hook protocol fails OPEN
+# (decision pass) — mounted, but nothing enforced. Best-effort probe
+# (bwrap present, or 'landlock' listed in the kernel LSM set); the runtime
+# additionally functional-probes each backend, so keep the operator's restart
+# requirement in the message.
+sandbox_backend_ok() {
+  [ "$(uname -s 2>/dev/null || true)" = Linux ] || return 0  # seatbelt/ACL platforms: out of scope here
+  command -v bwrap >/dev/null 2>&1 && return 0
+  grep -qw landlock /sys/kernel/security/lsm 2>/dev/null && return 0
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Uninstall (marker-aware)
 # ---------------------------------------------------------------------------
@@ -164,15 +184,24 @@ if [ "$UNINSTALL" = 1 ]; then
   NODE_STRIP="$(mktemp)"
   cat > "$NODE_STRIP" <<'EOF'
 const fs = require('fs');
-const B = '# GSD-DSH-bridge BEGIN', E = '# GSD-DSH-bridge END';
+const pairs = [
+  ['# GSD-DSH-bridge BEGIN', '# GSD-DSH-bridge END'],
+  ['# GSD-DSH-sandbox BEGIN', '# GSD-DSH-sandbox END'],
+];
 for (const f of process.argv.slice(2)) {
-  const s = fs.readFileSync(f, 'utf8');
-  if (!(s.includes(B) && s.includes(E))) { console.log('no marked block: ' + f); continue; }
-  const i = s.indexOf(B), j = s.indexOf(E);
-  fs.writeFileSync(f + '.stripped-bak', s);
-  const out = s.slice(0, i) + s.slice(j + E.length + 1);
-  fs.writeFileSync(f, out.replace(/\n{3,}$/, '\n'));
-  console.log('stripped ' + f + ' (backup: ' + f + '.stripped-bak)');
+  let s = fs.readFileSync(f, 'utf8');
+  const before = s;
+  const removed = [];
+  for (const [B, E] of pairs) {
+    if (!(s.includes(B) && s.includes(E))) continue;
+    removed.push(B.split(' ')[1]);
+    const i = s.indexOf(B), j = s.indexOf(E);
+    s = s.slice(0, i) + s.slice(j + E.length + 1);
+  }
+  if (removed.length === 0) { console.log('no marked block: ' + f); continue; }
+  fs.writeFileSync(f + '.stripped-bak', before);
+  fs.writeFileSync(f, s.replace(/\n{3,}$/, '\n'));
+  console.log('stripped ' + removed.join(',') + ' ' + f + ' (backup: ' + f + '.stripped-bak)');
 }
 EOF
   shopt -s nullglob
@@ -736,6 +765,64 @@ EOF
         echo "              @deepseek-ai/dsh-hook-protocol@<DSH-version>"
       fi
     done
+
+    # 6b/6 host sandbox backend probe + optional deployment-mode patch.
+    # The hooks bridge executes every hook through ctx.shell WITHOUT a sandbox
+    # policy, so the DEPLOYMENT default mode applies (sandbox-policy config:
+    # DSH_PERMISSION_MODE ?? 'workspace-write'). On a Linux host without
+    # bubblewrap and without Landlock, all hooks die with SANDBOX_UNAVAILABLE
+    # and fail open — "mounted, but nothing enforced" (cloud report 2026-11).
+    WANT_SANDBOX_PATCH="${GSD_HOOKS_SANDBOX_PATCH:-0}"
+    if [ "$WANT_SANDBOX_PATCH" = 1 ] || ! sandbox_backend_ok; then
+      if [ "$WANT_SANDBOX_PATCH" != 1 ]; then
+        echo "WARNING: this host has no usable backend for DSH's confined sandbox"
+        echo "         modes (no bubblewrap binary, no Landlock in the kernel LSM set)."
+        echo "         Every GSD guard hook will fail with SANDBOX_UNAVAILABLE and fail"
+        echo "         OPEN (decision pass) — the bridge looks active but enforces nothing."
+        echo "  Fix A (recommended, keeps the sandbox): install bubblewrap, then restart."
+        echo "       e.g. sudo apt-get install -y bubblewrap   (needs user namespaces)"
+        echo "  Fix B (lowers the deployment-wide default sandbox mode): start dsh with"
+        echo "       DSH_PERMISSION_MODE=danger-full-access, or re-run this installer with"
+        echo "       GSD_HOOKS_SANDBOX_PATCH=1 to patch it into every profile."
+        echo "  Either way: RESTART dsh web — the backend choice is cached per process."
+      else
+        note "GSD_HOOKS_SANDBOX_PATCH=1: applying sandbox-policy default-mode override"
+        note "(a deliberate, deployment-wide sandbox downgrade; remove it once a backend"
+        note "exists by deleting the GSD-DSH-sandbox BEGIN/END block or re-running --uninstall)."
+      fi
+      for pdir in $PROFILES_LIST; do
+        prof="$pdir/cordis.patch.yml"
+        if grep -q 'GSD-DSH-sandbox BEGIN' "$prof"; then
+          note "sandbox mode override already present in $prof"
+        else
+          cp "$prof" "$prof.bak.$(date +%s)"
+          cat >> "$prof" <<'SANDEOF'
+
+# GSD-DSH-sandbox BEGIN
+# DSH default sandbox mode override (added by install-gsd-dsh.sh,
+# GSD_HOOKS_SANDBOX_PATCH=1): this host cannot enforce confined modes, so
+# hooks would otherwise all fail open. Remove this block once a backend
+# (bubblewrap/Landlock) exists.
+- id: sandbox-policy
+  config:
+    mode: danger-full-access
+# GSD-DSH-sandbox END
+SANDEOF
+          note "appended sandbox-policy mode override to $prof"
+        fi
+      done
+      for pdir in $PROFILES_LIST; do
+        pname="$(basename "$pdir")"
+        if command -v dsh >/dev/null 2>&1 && \
+           DSH_HOME="$DSH_HOME" dsh --profile "$pname" --dump-config 2>/dev/null \
+             | grep -A4 'id: sandbox-policy' | grep -q 'danger-full-access'; then
+          note "verified: sandbox-policy mode=danger-full-access in profile '$pname'"
+        else
+          echo "WARNING: could not confirm the sandbox-policy override in profile '$pname'"
+          echo "         (check: dsh --profile $pname --dump-config | grep -A4 sandbox-policy)"
+        fi
+      done
+    fi
   fi
 fi
 

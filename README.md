@@ -113,6 +113,7 @@ are ignored: the hooks patch, bridge config and the `gsd_run` CLI always move wi
 | `GSD_FORCE_HOOKS_PATCH` | `0` | Write the hooks-bridge patch even when the `dsh-hooks-claude-code` plugin package is not detected |
 | `GSD_ALLOW_OLD_NODE` | `0` | Proceed despite Node < 24 (the engine may not run; only for when you know what you are doing) |
 | `GSD_NO_BRIDGE_SYNC` | `0` | Skip aligning the hooks bridge plugin version with your DSH version |
+| `GSD_HOOKS_SANDBOX_PATCH` | `0` | Host without a usable sandbox backend (no bubblewrap/Landlock on Linux): patch every profile's sandbox-policy default mode to `danger-full-access` so hooks stop failing open; a deliberate, deployment-wide sandbox downgrade — applied whenever set, regardless of the host probe |
 
 ## Upgrade, rollback and offline install
 
@@ -154,6 +155,15 @@ secret-read hard-blocks, commit-convention validation, and more.
   `GSD_NO_BRIDGE_SYNC=1` opts out). DSH disables any row whose package version it deems
   incompatible, so after upgrading DSH itself, re-run this installer before restarting to keep
   the bridge mounted.
+- **Linux sandbox backend is a hard requirement, or the guards fail open.** Hooks run through
+  DSH's bash sandbox under the deployment default mode (`workspace-write` unless overridden). A
+  Linux host without **bubblewrap** and without Landlock has no backend for that mode: every hook
+  then dies with `SANDBOX_UNAVAILABLE` ("no sandbox backend is usable on this host") and the hook
+  protocol fails **open** (`decision: pass`) — the bridge looks alive, nothing is enforced. The
+  installer probes this at install time and prints both remedies: install bubblewrap (recommended —
+  keeps the sandbox) or lower the deployment default via
+  `DSH_PERMISSION_MODE=danger-full-access` / `GSD_HOOKS_SANDBOX_PATCH=1`; restart `dsh web`
+  either way (the backend choice is cached per process). macOS (seatbelt) is unaffected.
 - All commands are routed through `hooks/dsh-gsd-suite/run.cjs`, which normalizes DSH's lowercase
   tool names (`read`, `write`, `bash`, …) to the PascalCase vocabulary GSD's guards expect —
   e.g. a model `read` of a `.env` file is hard-blocked (exit 2) with the guard's explanation text.
@@ -274,6 +284,7 @@ bash install-gsd-dsh.sh --uninstall
 | Hooks bridge has no effect | First restart `dsh web` (the patch mounts at process startup). If it still does nothing, run `dsh --profile <name> --dump-config | grep gsd-hooks-bridge`: a **missing row = installed but never mounted**, a row whose `configPath` is not your `$DSH_HOME/gsd-hooks.dsh.json` = a stale or hand-edited block — in both cases re-run this installer (it rewrites the mount block in every profile's `cordis.patch.yml` to canonical form and verifies the merged config before finishing; its WARNING prints the exact block to append by hand), then restart |
 | Startup log: `disabling profile plugin row "gsd-hooks-bridge" … incompatible` | Your DSH was upgraded past the bridge package version. Re-run the installer (it pins the bridge and its `dsh-hook-protocol` dependency to your DSH version automatically) or run `dsh plugin --profile <name> add --save-exact @deepseek-ai/dsh-hooks-claude-code@<your DSH version> @deepseek-ai/dsh-hook-protocol@<your DSH version>`, then restart |
 | Startup log: `failed to import … does not provide an export named 'selectHookGroups'` | Same fix as the line above — the bridge's `dsh-hook-protocol` dependency resolves to a stale hoisted copy; pin both packages to your DSH version and restart |
+| Hooks fire but every `hook/result` says `decision: pass` with stderr `SANDBOX_UNAVAILABLE` / "no sandbox backend is usable on this host" | The bridge is mounted but the Linux host cannot enforce the sandbox's default `workspace-write` mode (no bubblewrap, no Landlock), so hooks fail open. Fix A: `sudo apt-get install -y bubblewrap` and restart `dsh web` (recommended — keeps the sandbox). Fix B: start dsh with `DSH_PERMISSION_MODE=danger-full-access`, or re-run the installer with `GSD_HOOKS_SANDBOX_PATCH=1` (patches the `sandbox-policy` mode in every profile; remove that patch once a backend exists). Restart either way |
 | `ERROR: refusing to overwrite` | The target home already has same-named content not managed by this script; move it aside or use a different `DSH_HOME` |
 | `ERROR: fetched version X != requested Y` | Tag typo or npm cache issue; confirm the tag exists (e.g. `1.20.1`) |
 | Offline install fails | `GSD_PACKAGE_DIR` must be an npm-layout unpack artifact, not a git clone; a clone needs `npm install && npm run build:lib` first |
