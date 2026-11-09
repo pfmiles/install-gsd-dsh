@@ -560,7 +560,10 @@ if (!cmd) {
   process.stderr.write('run.cjs: missing hook command\n');
   process.exit(2);
 }
-const r = spawnSync(cmd, process.argv.slice(3), {
+// GSD's .sh hooks are bash scripts; Debian's /bin/sh (dash) cannot parse
+// `set -o pipefail`, so route an explicit "sh" request through bash.
+const resolved = cmd === 'sh' ? 'bash' : cmd;
+const r = spawnSync(resolved, process.argv.slice(3), {
   input: raw,
   stdio: ['pipe', 'inherit', 'inherit'],
 });
