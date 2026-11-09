@@ -571,11 +571,7 @@ if [ "$WITH_PATCH" = 1 ]; then
     note "this DSH version may not ship it — skipping patch (skills still work)."
     note "re-run with GSD_FORCE_HOOKS_PATCH=1 to force."
   else
-    if [ "$DSH_HOME" = "$HOME/.dsh" ]; then
-      CONFIG_PATH_LINE="        configPath: !!js process.env.HOME + '/.dsh/gsd-hooks.dsh.json'"
-    else
-      CONFIG_PATH_LINE="        configPath: '$DSH_HOME/gsd-hooks.dsh.json'"
-    fi
+    CONFIG_PATH_LINE="        configPath: '$DSH_HOME/gsd-hooks.dsh.json'"
     shopt -s nullglob
     PATCHED=0
     for prof in "$DSH_HOME"/profiles/*/cordis.patch.yml; do
