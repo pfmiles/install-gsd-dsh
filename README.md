@@ -110,6 +110,7 @@ are ignored: the hooks patch, bridge config and the `gsd_run` CLI always move wi
 | `GSD_PROFILE` | *(empty)* | Skill profile passed to the official installer: `core` / `standard` / `full`. Fewer skills = fewer tokens injected per session; use `core` in token-sensitive setups |
 | `GSD_FORCE_HOOKS_PATCH` | `0` | Write the hooks-bridge patch even when the `dsh-hooks-claude-code` plugin package is not detected |
 | `GSD_ALLOW_OLD_NODE` | `0` | Proceed despite Node < 24 (the engine may not run; only for when you know what you are doing) |
+| `GSD_NO_BRIDGE_SYNC` | `0` | Skip aligning the hooks bridge plugin version with your DSH version |
 
 ## Upgrade, rollback and offline install
 
@@ -146,6 +147,11 @@ secret-read hard-blocks, commit-convention validation, and more.
 
 - Enabled by default; a lean fresh install can skip it with `--no-ghooks`. Upgrades always
   (re)apply it.
+- **Version-locked to your DSH:** the installer detects your DSH version and pins
+  `@deepseek-ai/dsh-hooks-claude-code` to the same release (via `dsh plugin add --save-exact`;
+  `GSD_NO_BRIDGE_SYNC=1` opts out). DSH disables any row whose package version it deems
+  incompatible, so after upgrading DSH itself, re-run this installer before restarting to keep
+  the bridge mounted.
 - All commands are routed through `hooks/dsh-gsd-suite/run.cjs`, which normalizes DSH's lowercase
   tool names (`read`, `write`, `bash`, …) to the PascalCase vocabulary GSD's guards expect —
   e.g. a model `read` of a `.env` file is hard-blocked (exit 2) with the guard's explanation text.
@@ -174,7 +180,9 @@ secret-read hard-blocks, commit-convention validation, and more.
    subagent prompt), tool-name mapping (`Skill`→`skill`, `Bash`→`bash`, …), and handling for
    `@path` references / `$ARGUMENTS` (see *Limitations*).
 4. **Append** the hooks-bridge mount block to each profile's `cordis.patch.yml` (on by default;
-   skipped with `--no-ghooks` on fresh installs; begin/end-marked, backed up before every write).
+   skipped with `--no-ghooks` on fresh installs; begin/end-marked, backed up before every write)
+   and **align the bridge plugin version with the running DSH** so DSH's version gate won't
+   disable the row.
 
 ## What works — and the honest limitations
 
@@ -245,6 +253,7 @@ bash install-gsd-dsh.sh --uninstall
 | Typing `/gsd-*` does nothing | That is DSH's user-invocable skill mechanism; ensure the skill directory is visible (above) and your DSH version supports `/name` invocation |
 | `gsd_run` not found | The global CLI is installed by default; if the script reported `'npm i -g' failed` (npm prefix not writable), call `node $DSH_HOME/gsd-core/bin/gsd-tools.cjs` directly or fix the prefix and re-run `npm i -g @opengsd/gsd-core@<version>` |
 | Hooks bridge has no effect | Restart `dsh web` (the patch mounts at process startup), then verify; check DSH startup logs for plugin warnings and restore the `.bak` patch if needed |
+| Startup log: `disabling profile plugin row "gsd-hooks-bridge" … incompatible` | Your DSH was upgraded past the bridge package version. Re-run the installer (it pins the bridge to your DSH version automatically) or run `dsh plugin --profile <name> add --save-exact @deepseek-ai/dsh-hooks-claude-code@<your DSH version>`, then restart |
 | `ERROR: refusing to overwrite` | The target home already has same-named content not managed by this script; move it aside or use a different `DSH_HOME` |
 | `ERROR: fetched version X != requested Y` | Tag typo or npm cache issue; confirm the tag exists (e.g. `1.16.0`) |
 | Offline install fails | `GSD_PACKAGE_DIR` must be an npm-layout unpack artifact, not a git clone; a clone needs `npm install && npm run build:lib` first |

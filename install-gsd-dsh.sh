@@ -42,6 +42,7 @@
 #   GSD_FORCE_HOOKS_PATCH=1 write the bridge patch even if the bridge plugin package
 #                           is missing from $DSH_HOME/profiles/node_modules
 #   GSD_ALLOW_OLD_NODE=1    proceed despite Node < 24 (engine may not run)
+#   GSD_NO_BRIDGE_SYNC=1    skip aligning the hooks bridge plugin to the DSH version
 set -euo pipefail
 
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
@@ -95,6 +96,45 @@ BRIDGE_PKG="$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh-hooks-claude-code"
 
 banner()  { echo "== $* =="; }
 note()    { echo "   $*"; }
+
+# Version of the DSH that owns this home: the dsh CLI, else the dsh package the
+# profile's node_modules resolves from. Empty when neither is available.
+dsh_version() {
+  local v
+  if command -v dsh >/dev/null 2>&1; then
+    v="$(dsh --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -1 || true)"
+    if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  fi
+  for bp in "$DSH_HOME"/profiles/*/node_modules; do
+    if [ -f "$bp/dsh/package.json" ]; then
+      v="$(node -p "require('$bp/dsh/package.json').version" 2>/dev/null || true)"
+      if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+    fi
+  done
+  if [ -f "$DSH_HOME/profiles/node_modules/dsh/package.json" ]; then
+    v="$(node -p "require('$DSH_HOME/profiles/node_modules/dsh/package.json').version" 2>/dev/null || true)"
+    if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  fi
+  return 1
+}
+
+# Version of the installed hooks bridge plugin. DSH resolves the row from the
+# profile's own node_modules, so check profile-local trees first; the hoisted
+# top-level store is only a fallback (it can be stale after DSH upgrades).
+bridge_version() {
+  local bp v
+  for bp in "$DSH_HOME"/profiles/*/node_modules; do
+    if [ -f "$bp/@deepseek-ai/dsh-hooks-claude-code/package.json" ]; then
+      v="$(node -p "require('$bp/@deepseek-ai/dsh-hooks-claude-code/package.json').version" 2>/dev/null || true)"
+      if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+    fi
+  done
+  if [ -f "$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh-hooks-claude-code/package.json" ]; then
+    v="$(node -p "require('$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh-hooks-claude-code/package.json').version" 2>/dev/null || true)"
+    if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  fi
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # Uninstall (marker-aware)
@@ -487,7 +527,45 @@ note "wrote $DSH_HOME/hooks/dsh-gsd-suite/run.cjs + $DSH_HOME/gsd-hooks.dsh.json
 # on fresh installs); then --fix-repo / --npm-bin
 # ---------------------------------------------------------------------------
 if [ "$WITH_PATCH" = 1 ]; then
-  banner "6/6 profile patch for @deepseek-ai/dsh-hooks-claude-code"
+  banner "6/6 hooks bridge: align plugin version + profile patch"
+
+  # DSH's version gate disables any plugin row whose package version does not
+  # match the running DSH. A bridge left behind by an older DSH therefore never
+  # mounts and the GSD guards silently never fire — so keep the bridge package
+  # in lockstep with DSH (GSD_NO_BRIDGE_SYNC=1 opts out; failure never aborts).
+  DSH_VER="$(dsh_version || true)"
+  BRIDGE_VER="$(bridge_version || true)"
+  if [ -n "$DSH_VER" ] && [ "${GSD_NO_BRIDGE_SYNC:-0}" != 1 ]; then
+    if [ "$BRIDGE_VER" = "$DSH_VER" ]; then
+      note "hooks bridge plugin matches DSH $DSH_VER — in sync."
+    else
+      if [ -z "$BRIDGE_VER" ]; then
+        note "hooks bridge plugin not installed (DSH $DSH_VER) — installing."
+      else
+        note "hooks bridge $BRIDGE_VER != DSH $DSH_VER — DSH would disable the row; aligning."
+      fi
+      if command -v dsh >/dev/null 2>&1; then
+        for pdir in "$DSH_HOME"/profiles/*/package.json; do
+          [ -f "$pdir" ] || continue
+          prof="$(basename "$(dirname "$pdir")")"
+          if DSH_HOME="$DSH_HOME" dsh plugin --profile "$prof" add --save-exact "@deepseek-ai/dsh-hooks-claude-code@$DSH_VER" >/dev/null 2>&1; then
+            note "installed @deepseek-ai/dsh-hooks-claude-code@$DSH_VER into profile '$prof'"
+          else
+            note "WARNING: could not install the bridge into profile '$prof' (dsh plugin add failed)."
+          fi
+        done
+        BRIDGE_VER="$(bridge_version || true)"
+      fi
+      if [ "$BRIDGE_VER" = "$DSH_VER" ]; then
+        note "hooks bridge plugin aligned to $DSH_VER."
+      else
+        note "WARNING: hooks bridge not aligned to DSH $DSH_VER — DSH will keep the"
+        note "gsd-hooks-bridge row disabled until it matches. Fix manually:"
+        note "  dsh plugin --profile <profile> add --save-exact @deepseek-ai/dsh-hooks-claude-code@$DSH_VER"
+      fi
+    fi
+  fi
+
   if [ ! -d "$BRIDGE_PKG" ] && [ "${GSD_FORCE_HOOKS_PATCH:-0}" != 1 ]; then
     note "bridge plugin package not found at $BRIDGE_PKG"
     note "this DSH version may not ship it — skipping patch (skills still work)."
