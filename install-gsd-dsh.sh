@@ -561,8 +561,9 @@ if (!cmd) {
   process.exit(2);
 }
 // GSD's .sh hooks are bash scripts; Debian's /bin/sh (dash) cannot parse
-// `set -o pipefail`, so route an explicit "sh" request through bash.
-const resolved = cmd === 'sh' ? 'bash' : cmd;
+// `set -o pipefail`, and its exit code 2 would collide with the hook
+// protocol's block code — so route every sh request through bash.
+const resolved = cmd === 'sh' || cmd.endsWith('/sh') ? 'bash' : cmd;
 const r = spawnSync(resolved, process.argv.slice(3), {
   input: raw,
   stdio: ['pipe', 'inherit', 'inherit'],
