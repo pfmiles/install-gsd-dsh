@@ -40,7 +40,7 @@
 #                           source/npm layout (skips npm download entirely)
 #   GSD_PROFILE             installer skill profile passthrough (core|standard|full)
 #   GSD_FORCE_HOOKS_PATCH=1 write the bridge patch even if the bridge plugin package
-#                           is missing from $DSH_HOME/profiles/node_modules
+#                           is not detected anywhere under $DSH_HOME/profiles
 #   GSD_ALLOW_OLD_NODE=1    proceed despite Node < 24 (engine may not run)
 #   GSD_NO_BRIDGE_SYNC=1    skip aligning the hooks bridge plugin to the DSH version
 set -euo pipefail
@@ -53,6 +53,7 @@ WITH_PATCH=1
 NPM_BIN=1
 DECLINED_PATCH=0
 DECLINED_BIN=0
+HOOKS_OK=0
 UNINSTALL=0
 FIX_REPO=0
 for a in "$@"; do
@@ -570,16 +571,41 @@ if [ "$WITH_PATCH" = 1 ]; then
     fi
   fi
 
-  if [ ! -d "$BRIDGE_PKG" ] && [ "${GSD_FORCE_HOOKS_PATCH:-0}" != 1 ]; then
-    note "bridge plugin package not found at $BRIDGE_PKG"
+  # `dsh plugin --profile <p> add` installs the bridge into the profile's own
+  # node_modules tree; the shared hoisted store (profiles/node_modules) may hold
+  # a stale copy, or none at all on a fresh machine. Detect the package the same
+  # profile-local-first way bridge_version() does — guarding this block on the
+  # hoisted path alone left fresh machines with the package installed but the
+  # mount patch never written ("installed but not mounted", cloud report
+  # 2026-11). The patch below is the ONLY thing that mounts the bridge:
+  # `dsh plugin add` installs; it does not mount.
+  BRIDGE_VER="$(bridge_version || true)"
+  if [ -z "$BRIDGE_VER" ] && [ "${GSD_FORCE_HOOKS_PATCH:-0}" != 1 ]; then
+    note "bridge plugin package not found (checked every profile node_modules"
+    note "plus the shared store at $BRIDGE_PKG)"
     note "this DSH version may not ship it — skipping patch (skills still work)."
     note "re-run with GSD_FORCE_HOOKS_PATCH=1 to force."
   else
     CONFIG_PATH_LINE="        configPath: '$DSH_HOME/gsd-hooks.dsh.json'"
+    if [ ! -f "$DSH_HOME/gsd-hooks.dsh.json" ]; then
+      echo "WARNING: $DSH_HOME/gsd-hooks.dsh.json is missing — even a mounted bridge"
+      echo "         would register zero hooks. It should have been written in 5/6."
+    fi
     shopt -s nullglob
     PATCHED=0
-    for prof in "$DSH_HOME"/profiles/*/cordis.patch.yml; do
-      [ -f "$prof" ] || continue
+    PROFILES_LIST=""
+    # Iterate every profile that has a package.json — including one without a
+    # cordis.patch.yml yet. A fresh profile must get a patch layer created,
+    # otherwise the mount is silently lost.
+    for pd in "$DSH_HOME"/profiles/*/package.json; do
+      [ -f "$pd" ] || continue
+      pdir="$(dirname "$pd")"
+      prof="$pdir/cordis.patch.yml"
+      PROFILES_LIST="$PROFILES_LIST $pdir"
+      if [ ! -f "$prof" ]; then
+        : > "$prof"
+        note "created $prof (profile '$(basename "$pdir")' had no patch layer)"
+      fi
       if grep -q 'gsd-hooks-bridge' "$prof"; then
         # retrofit BEGIN/END markers around a pre-marker block for clean later uninstall
         NODE_RETRO="$(mktemp)"
@@ -625,7 +651,43 @@ EOF
         PATCHED=1
       fi
     done
-    [ "$PATCHED" = 1 ] || note "no profile patch files found under $DSH_HOME/profiles"
+    if [ "$PATCHED" != 1 ]; then
+      note "no profile package.json found under $DSH_HOME/profiles — the bridge"
+      note "was not mounted. Start DSH once, then re-run this script."
+    fi
+    # Post-flight verification: the mount is the point of this step, so a silent
+    # miss must not masquerade as success. Two checks per profile —
+    # 1. the insert survives the profile merge (--dump-config);
+    # 2. the bridge package actually imports from the profile tree (a stale
+    #    hoisted dsh-hook-protocol breaks startup imports).
+    for pdir in $PROFILES_LIST; do
+      pname="$(basename "$pdir")"
+      if command -v dsh >/dev/null 2>&1; then
+        if DSH_HOME="$DSH_HOME" dsh --profile "$pname" --dump-config 2>/dev/null | grep -q 'gsd-hooks-bridge'; then
+          HOOKS_OK=1
+          note "verified: gsd-hooks-bridge in merged config of profile '$pname'"
+        else
+          echo "WARNING: gsd-hooks-bridge is NOT in the merged config of profile '$pname'."
+          echo "         manual fix — append to $pdir/cordis.patch.yml:"
+          echo "           - insert:"
+          echo "               - id: gsd-hooks-bridge"
+          echo "                 name: '@deepseek-ai/dsh-hooks-claude-code'"
+          echo "                 config:"
+          echo "                   configPath: '$DSH_HOME/gsd-hooks.dsh.json'"
+          echo "                   pluginRoot: '$DSH_HOME'"
+        fi
+      else
+        note "dsh CLI not on PATH — skipped merged-config check ($pname)."
+        note "restart DSH, then verify: dsh --profile $pname --dump-config | grep gsd-hooks-bridge"
+      fi
+      if ! (cd "$pdir" && node -e "require('@deepseek-ai/dsh-hooks-claude-code')" >/dev/null 2>&1); then
+        echo "WARNING: @deepseek-ai/dsh-hooks-claude-code does not import from profile '$pname'"
+        echo "         (usually a stale hoisted @deepseek-ai/dsh-hook-protocol)."
+        echo "         fix: dsh plugin --profile $pname add --save-exact"
+        echo "              @deepseek-ai/dsh-hooks-claude-code@<DSH-version>"
+        echo "              @deepseek-ai/dsh-hook-protocol@<DSH-version>"
+      fi
+    done
   fi
 fi
 
@@ -662,4 +724,11 @@ rm -rf "$STAGING" "$WORK"
 echo ""
 echo "DONE ($GSD_VERSION -> $DSH_HOME)."
 echo "  - 技能目录应列出全部 gsd-* 技能;输入 /gsd-new-project 或 /gsd-onboard 开始。"
-echo "  - 钩子桥需要 DSH 进程重启后生效(读取 $DSH_HOME/profiles/*/cordis.patch.yml)。"
+if [ "$WITH_PATCH" = 1 ]; then
+  if [ "$HOOKS_OK" = 1 ]; then
+    echo "  - 钩子桥:已写入每个 profile 的 cordis.patch.yml,并通过 --dump-config 验证"
+    echo "    (gsd-hooks-bridge)。重启 DSH 后守卫生效。"
+  else
+    echo "  - 钩子桥:未生效!守卫此刻静默关闭——按上方 WARNING 修复,或重跑本脚本后再重启 DSH。"
+  fi
+fi

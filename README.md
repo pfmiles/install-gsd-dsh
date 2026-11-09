@@ -26,7 +26,8 @@ filesystem **skill** provider and the Claude-Code **hooks bridge**.
 > other runtimes — not DSH. This script reuses the official installer's own `--claude`
 > passthrough into a throwaway staging directory, then deploys only the surfaces DSH understands,
 > adding a small model-facing adaptation note to every skill. Verified against
-> **DSH 0.2.0-rc.2** (web profile, standard preset) and **GSD Core 1.16.0+**.
+> **DSH 0.2.0-rc.2** (web profile, standard preset) and **GSD Core 1.16.0+**; the
+> hooks-bridge mount was also verified live on DSH 0.2.2-rc.1.
 
 ---
 
@@ -158,10 +159,19 @@ secret-read hard-blocks, commit-convention validation, and more.
 - Known gap: the DSH bridge has no `PreCompact` / `FileChanged` / statusline events, so the
   corresponding GSD guards stay silent on DSH (the same status as GSD on Codex itself). This is a
   host limitation, not a script defect.
+- **Mounting is the patch, not the install:** `dsh plugin add` only installs the package (it
+  forwards to pnpm) — the mount happens exclusively through the block the installer appends to
+  each profile's `cordis.patch.yml` (the patch layer is created if the profile has none). The
+  installer detects the bridge package in each profile's own `node_modules` first and the shared
+  hoisted store second, and after every run it **verifies** that
+  `dsh --profile <name> --dump-config` contains `gsd-hooks-bridge` and that the bridge imports
+  from the profile tree — a silent "installed but never mounted" state now ends the run with an
+  explicit WARNING (which prints the exact block to append by hand) instead of passing silently.
 - The patch block is wrapped in `# GSD-DSH-bridge BEGIN/END` markers; `--uninstall` strips it
   automatically (leaving a backup).
-- If your DSH build does not ship the bridge plugin package, the script skips the patch with a
-  message (skill installation is unaffected). Force it with `GSD_FORCE_HOOKS_PATCH=1`.
+- If no bridge plugin package can be found (checked in every profile's node_modules and the
+  shared store), the script skips the patch with a message (skill installation is unaffected).
+  Force it with `GSD_FORCE_HOOKS_PATCH=1`.
 - The bridge is a process-level mount: **restart `dsh web`** after installing for it to take
   effect.
 
@@ -180,9 +190,12 @@ secret-read hard-blocks, commit-convention validation, and more.
    subagent prompt), tool-name mapping (`Skill`→`skill`, `Bash`→`bash`, …), and handling for
    `@path` references / `$ARGUMENTS` (see *Limitations*).
 4. **Append** the hooks-bridge mount block to each profile's `cordis.patch.yml` (on by default;
-   skipped with `--no-ghooks` on fresh installs; begin/end-marked, backed up before every write)
-   and **align the bridge plugin version with the running DSH** so DSH's version gate won't
-   disable the row.
+   skipped with `--no-ghooks` on fresh installs; the patch layer is created if the profile has
+   none; begin/end-marked, backed up before every write), **align the bridge plugin version with
+   the running DSH** so DSH's version gate won't disable the row — then **verify the mount**:
+   every profile's merged config must contain `gsd-hooks-bridge` and the bridge must import from
+   the profile tree, or the run ends with an explicit WARNING (`dsh plugin add` installs; it
+   never mounts — mounting is this patch alone).
 
 ## What works — and the honest limitations
 
@@ -222,8 +235,9 @@ expectation until proven otherwise. Optional MCP tooling (Context7 etc.) works i
 1. The session skill catalog lists all 72 `gsd-*` skills; `/gsd-health` executes.
 2. Terminal: `gsd_run runtime-identity --raw` prints `@opengsd/gsd-core` and the target version
    (the global CLI is installed by default; omitted only with `--no-npm-bin`).
-3. With the bridge installed **and DSH restarted**: asking the model to `read` a `.env` file is
-   blocked with an explanation; a GSD update check appears at session start.
+3. With the bridge installed **and DSH restarted**: `dsh --profile <name> --dump-config | grep gsd-hooks-bridge`
+   lists the mount; asking the model to `read` a `.env` file is blocked with an explanation; a
+   GSD update check appears at session start.
 4. `/gsd-new-project --auto` in a small test repo scaffolds a `.planning/` skeleton.
 
 ## Uninstall
@@ -252,7 +266,7 @@ bash install-gsd-dsh.sh --uninstall
 | Skills don't appear in the session | Confirm `DSH_HOME` matches the home DSH actually uses; confirm `skills/gsd-*` files are in place; reopen the session (skill directories hot-reload in running sessions) |
 | Typing `/gsd-*` does nothing | That is DSH's user-invocable skill mechanism; ensure the skill directory is visible (above) and your DSH version supports `/name` invocation |
 | `gsd_run` not found | The global CLI is installed by default; if the script reported `'npm i -g' failed` (npm prefix not writable), call `node $DSH_HOME/gsd-core/bin/gsd-tools.cjs` directly or fix the prefix and re-run `npm i -g @opengsd/gsd-core@<version>` |
-| Hooks bridge has no effect | Restart `dsh web` (the patch mounts at process startup), then verify; check DSH startup logs for plugin warnings and restore the `.bak` patch if needed |
+| Hooks bridge has no effect | First restart `dsh web` (the patch mounts at process startup). If it still does nothing, run `dsh --profile <name> --dump-config | grep gsd-hooks-bridge`: a **missing row = installed but never mounted** — re-run this installer (it now appends the mount block to every profile's `cordis.patch.yml`, verifies the merged config before finishing, and its WARNING prints the exact block to append by hand), then restart |
 | Startup log: `disabling profile plugin row "gsd-hooks-bridge" … incompatible` | Your DSH was upgraded past the bridge package version. Re-run the installer (it pins the bridge and its `dsh-hook-protocol` dependency to your DSH version automatically) or run `dsh plugin --profile <name> add --save-exact @deepseek-ai/dsh-hooks-claude-code@<your DSH version> @deepseek-ai/dsh-hook-protocol@<your DSH version>`, then restart |
 | Startup log: `failed to import … does not provide an export named 'selectHookGroups'` | Same fix as the line above — the bridge's `dsh-hook-protocol` dependency resolves to a stale hoisted copy; pin both packages to your DSH version and restart |
 | `ERROR: refusing to overwrite` | The target home already has same-named content not managed by this script; move it aside or use a different `DSH_HOME` |
