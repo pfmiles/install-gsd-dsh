@@ -483,7 +483,8 @@ EOF
 note "wrote $DSH_HOME/hooks/dsh-gsd-suite/run.cjs + $DSH_HOME/gsd-hooks.dsh.json"
 
 # ---------------------------------------------------------------------------
-# 6/6 optional profile patch for the hooks bridge (+ --fix-repo / --npm-bin)
+# 6/6 profile patch for the hooks bridge — on by default (--no-ghooks skips it
+# on fresh installs); then --fix-repo / --npm-bin
 # ---------------------------------------------------------------------------
 if [ "$WITH_PATCH" = 1 ]; then
   banner "6/6 profile patch for @deepseek-ai/dsh-hooks-claude-code"

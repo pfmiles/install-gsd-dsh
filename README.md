@@ -77,7 +77,9 @@ Then, in any DSH session:
 | `profiles/*/cordis.patch.yml` (default; skip with `--no-ghooks`) | appended bridge-mount section | makes the hooks effective in DSH sessions |
 
 The script **never** touches: `~/.claude`, your project files, the rest of your DSH configuration
-(except the profiles patch above), or any skill not prefixed `gsd-*`.
+(except the profiles patch above), or any skill not prefixed `gsd-*`. (The one deliberate
+exception: an explicit `--fix-repo` run refreshes the build outputs inside the `gsd-core` source
+checkout you run it from.)
 
 ## Options and environment variables
 
@@ -160,7 +162,8 @@ secret-read hard-blocks, commit-convention validation, and more.
 ## How it works
 
 1. **Fetch** `@opengsd/gsd-core@<GSD_VERSION>` from npm (`GSD_VERSION` is required online and a
-   `v` prefix is normalized) — or use `GSD_PACKAGE_DIR` for offline — and verify the fetched
+   `v` prefix is normalized; if `npm pack` fails, the script falls back to
+   `npm install --prefix`) — or use `GSD_PACKAGE_DIR` for offline — and verify the fetched
    version equals the requested one.
 2. **Stage** using the official installer's `--claude --global` passthrough into a throwaway
    `CLAUDE_CONFIG_DIR` (flat skills + engine payload + hook scripts, internal path references
