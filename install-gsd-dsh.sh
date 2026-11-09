@@ -48,7 +48,11 @@
 #   GSD_HOOKS_SANDBOX_PATCH=1 host without a usable sandbox backend (no
 #                           bubblewrap/Landlock on Linux): patch the DSH
 #                           sandbox-policy default mode to danger-full-access
-#                           so hooks do not all fail open (see README §Hooks)
+#                           so hooks do not all fail open (see README §Hooks).
+#                           =strip removes a previously applied override.
+#   GSD_INSTALL_BWRAP=1      when the sandbox backend is missing, attempt to
+#                           install bubblewrap via the distro package manager
+#                           (root or sudo); best-effort, never aborts
 set -euo pipefail
 
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
@@ -60,6 +64,8 @@ NPM_BIN=1
 DECLINED_PATCH=0
 DECLINED_BIN=0
 HOOKS_OK=0
+SANDBOX_APPLIED=0
+SBOX_MISSING=0
 UNINSTALL=0
 FIX_REPO=0
 for a in "$@"; do
@@ -154,9 +160,68 @@ bridge_version() {
 # requirement in the message.
 sandbox_backend_ok() {
   [ "$(uname -s 2>/dev/null || true)" = Linux ] || return 0  # seatbelt/ACL platforms: out of scope here
-  command -v bwrap >/dev/null 2>&1 && return 0
+  bwrap_usable && return 0
   grep -qw landlock /sys/kernel/security/lsm 2>/dev/null && return 0
   return 1
+}
+
+# Functional bubblewrap smoke, mirroring DSH's own runner probe (spawnSync
+# "bwrap" <read-only profile args> "--" "true" → exit 0). Presence of the
+# binary alone is not enough: unprivileged user namespaces may be disabled
+# (Ubuntu 24.04 AppArmor restriction, container hosts), in which case the
+# runtime probe still fails and hooks still die — so test the real thing.
+bwrap_usable() {
+  command -v bwrap >/dev/null 2>&1 || return 1
+  bwrap --ro-bind / / --proc /proc --dev /dev /bin/true >/dev/null 2>&1 || \
+  bwrap --ro-bind / / /bin/true >/dev/null 2>&1
+}
+
+# Best-effort provisioning through the distro package manager (root, or sudo).
+# Any failure just falls back to the printed instructions — never aborts.
+install_bubblewrap() {
+  local pkg_cmd=""
+  if command -v apt-get >/dev/null 2>&1; then pkg_cmd="apt-get install -y bubblewrap"
+  elif command -v dnf >/dev/null 2>&1; then pkg_cmd="dnf install -y bubblewrap"
+  elif command -v yum >/dev/null 2>&1; then pkg_cmd="yum install -y bubblewrap"
+  elif command -v apk >/dev/null 2>&1; then pkg_cmd="apk add bubblewrap"
+  else
+    note "no supported package manager found (apt-get/dnf/yum/apk) — install"
+    note "bubblewrap manually, then re-run this script."
+    return 1
+  fi
+  if [ "$(id -u 2>/dev/null || echo 1)" = 0 ]; then
+    note "running (root): $pkg_cmd"
+    $pkg_cmd >/dev/null 2>&1
+  elif command -v sudo >/dev/null 2>&1; then
+    note "running: sudo $pkg_cmd"
+    sudo $pkg_cmd >/dev/null 2>&1
+  else
+    note "not root and no sudo available — run manually: sudo $pkg_cmd"
+    return 1
+  fi
+}
+
+# Remove a previously applied GSD-DSH-sandbox downgrade block from the given
+# patch files (each backed up first). Shared by the explicit
+# GSD_HOOKS_SANDBOX_PATCH=strip mode and the self-heal after bubblewrap lands.
+_strip_sandbox_patch_blocks() {
+  [ "$#" -gt 0 ] || return 0
+  local NODE_SSTRIP
+  NODE_SSTRIP="$(mktemp)"
+  cat > "$NODE_SSTRIP" <<'EOF'
+const fs = require('fs');
+const B = '# GSD-DSH-sandbox BEGIN', E = '# GSD-DSH-sandbox END';
+for (const f of process.argv.slice(2)) {
+  const s = fs.readFileSync(f, 'utf8');
+  if (!(s.includes(B) && s.includes(E))) { console.log('no sandbox block: ' + f); continue; }
+  const i = s.indexOf(B), j = s.indexOf(E);
+  fs.writeFileSync(f + '.stripped-bak', s);
+  fs.writeFileSync(f, (s.slice(0, i) + s.slice(j + E.length + 1)).replace(/\n{3,}$/, '\n'));
+  console.log('stripped sandbox block from ' + f + ' (backup: ' + f + '.stripped-bak)');
+}
+EOF
+  node "$NODE_SSTRIP" "$@"
+  rm -f "$NODE_SSTRIP"
 }
 
 # ---------------------------------------------------------------------------
@@ -766,43 +831,58 @@ EOF
       fi
     done
 
-    # 6b/6 host sandbox backend probe + optional deployment-mode patch.
-    # The hooks bridge executes every hook through ctx.shell WITHOUT a sandbox
-    # policy, so the DEPLOYMENT default mode applies (sandbox-policy config:
-    # DSH_PERMISSION_MODE ?? 'workspace-write'). On a Linux host without
-    # bubblewrap and without Landlock, all hooks die with SANDBOX_UNAVAILABLE
-    # and fail open — "mounted, but nothing enforced" (cloud report 2026-11).
+    # 6b/6 host sandbox backend probe, bubblewrap assist, and the optional
+    # deployment-mode patch. The hooks bridge executes every hook through
+    # ctx.shell WITHOUT a sandbox policy, so the DEPLOYMENT default mode
+    # applies (sandbox-policy config: DSH_PERMISSION_MODE ??
+    # 'workspace-write'). On Linux that confined path needs bubblewrap or a
+    # Landlock-enabled kernel; without either, every hook dies with
+    # SANDBOX_UNAVAILABLE and fails open — "mounted, but nothing enforced"
+    # (cloud report 2026-11).
     WANT_SANDBOX_PATCH="${GSD_HOOKS_SANDBOX_PATCH:-0}"
-    if [ "$WANT_SANDBOX_PATCH" = 1 ] || ! sandbox_backend_ok; then
-      if [ "$WANT_SANDBOX_PATCH" != 1 ]; then
-        echo "WARNING: this host has no usable backend for DSH's confined sandbox"
-        echo "         modes (no bubblewrap binary, no Landlock in the kernel LSM set)."
-        echo "         Every GSD guard hook will fail with SANDBOX_UNAVAILABLE and fail"
-        echo "         OPEN (decision pass) — the bridge looks active but enforces nothing."
-        echo "  Fix A (recommended, keeps the sandbox): install bubblewrap, then restart."
-        echo "       e.g. sudo apt-get install -y bubblewrap   (needs user namespaces)"
-        echo "  Fix B (lowers the deployment-wide default sandbox mode): start dsh with"
-        echo "       DSH_PERMISSION_MODE=danger-full-access, or re-run this installer with"
-        echo "       GSD_HOOKS_SANDBOX_PATCH=1 to patch it into every profile."
-        echo "  Either way: RESTART dsh web — the backend choice is cached per process."
+    BACKEND_OK=1; sandbox_backend_ok || BACKEND_OK=0
+
+    # A) attempt provisioning when requested — best-effort, never aborts.
+    if [ "$BACKEND_OK" = 0 ] && [ "${GSD_INSTALL_BWRAP:-0}" = 1 ]; then
+      note "GSD_INSTALL_BWRAP=1: attempting to install bubblewrap (root/sudo required)"
+      if install_bubblewrap && sandbox_backend_ok; then
+        BACKEND_OK=1
+        note "bubblewrap installed and functional — RESTART dsh web to pick it up"
+        note "(the backend choice is cached per dsh process)."
+        note "removing any earlier GSD-DSH-sandbox downgrade block (backend is back):"
+        for pdir in $PROFILES_LIST; do _strip_sandbox_patch_blocks "$pdir/cordis.patch.yml"; done
       else
-        note "GSD_HOOKS_SANDBOX_PATCH=1: applying sandbox-policy default-mode override"
-        note "(a deliberate, deployment-wide sandbox downgrade; remove it once a backend"
-        note "exists by deleting the GSD-DSH-sandbox BEGIN/END block or re-running --uninstall)."
+        note "bubblewrap install failed or still not functional — see Fix A/B below."
       fi
+    fi
+
+    # Explicit removal of a previous downgrade block.
+    if [ "$WANT_SANDBOX_PATCH" = strip ]; then
+      note "GSD_HOOKS_SANDBOX_PATCH=strip: removing sandbox-policy downgrade blocks"
+      for pdir in $PROFILES_LIST; do _strip_sandbox_patch_blocks "$pdir/cordis.patch.yml"; done
+      note "restart dsh web afterwards to run hooks under the restored default."
+    fi
+
+    # B) apply the downgrade patch — only when explicitly requested on a host
+    #    that still lacks a backend (never on healthy hosts).
+    if [ "$WANT_SANDBOX_PATCH" = 1 ] && [ "$BACKEND_OK" = 0 ]; then
+      note "GSD_HOOKS_SANDBOX_PATCH=1: applying sandbox-policy default-mode override"
+      note "(a deliberate, deployment-wide sandbox downgrade; remove it once a backend"
+      note "exists with GSD_HOOKS_SANDBOX_PATCH=strip)."
       for pdir in $PROFILES_LIST; do
         prof="$pdir/cordis.patch.yml"
         if grep -q 'GSD-DSH-sandbox BEGIN' "$prof"; then
           note "sandbox mode override already present in $prof"
         else
           cp "$prof" "$prof.bak.$(date +%s)"
+          SANDBOX_APPLIED=1
           cat >> "$prof" <<'SANDEOF'
 
 # GSD-DSH-sandbox BEGIN
 # DSH default sandbox mode override (added by install-gsd-dsh.sh,
 # GSD_HOOKS_SANDBOX_PATCH=1): this host cannot enforce confined modes, so
 # hooks would otherwise all fail open. Remove this block once a backend
-# (bubblewrap/Landlock) exists.
+# (bubblewrap/Landlock) exists — GSD_HOOKS_SANDBOX_PATCH=strip does it.
 - id: sandbox-policy
   config:
     mode: danger-full-access
@@ -820,6 +900,38 @@ SANDEOF
         else
           echo "WARNING: could not confirm the sandbox-policy override in profile '$pname'"
           echo "         (check: dsh --profile $pname --dump-config | grep -A4 sandbox-policy)"
+        fi
+      done
+    fi
+
+    # Backend still missing and no downgrade requested → the loud honest warning.
+    if [ "$BACKEND_OK" = 0 ] && [ "$WANT_SANDBOX_PATCH" != 1 ]; then
+      SBOX_MISSING=1
+      echo "WARNING: this host has no usable backend for DSH's confined sandbox modes"
+      echo "         (bubblewrap missing or failing, and no Landlock). Every GSD guard"
+      echo "         hook will fail with SANDBOX_UNAVAILABLE and fail OPEN (decision pass)"
+      echo "         — the bridge looks active but enforces nothing."
+      echo "  Fix A (recommended, keeps the sandbox): install bubblewrap, then restart."
+      echo "       Debian/Ubuntu: sudo apt-get install -y bubblewrap"
+      echo "       Fedora/RHEL:   sudo dnf install -y bubblewrap"
+      echo "       or re-run this installer with GSD_INSTALL_BWRAP=1 (auto-attempt)."
+      echo "       bubblewrap needs unprivileged user namespaces: 'unshare -Ur true'"
+      echo "       must succeed on this host."
+      echo "  Fix B (lowers the deployment-wide default sandbox mode): start dsh with"
+      echo "       DSH_PERMISSION_MODE=danger-full-access, or re-run this installer with"
+      echo "       GSD_HOOKS_SANDBOX_PATCH=1 to patch it into every profile"
+      echo "       (later: GSD_HOOKS_SANDBOX_PATCH=strip removes it again)."
+      echo "  Either way: RESTART dsh web — the backend choice is cached per process."
+    fi
+
+    # Backend present but an older downgrade block lingers → advisory.
+    if [ "$BACKEND_OK" = 1 ] && [ "$WANT_SANDBOX_PATCH" != 1 ]; then
+      for pdir in $PROFILES_LIST; do
+        prof="$pdir/cordis.patch.yml"
+        if grep -q 'GSD-DSH-sandbox BEGIN' "$prof"; then
+          echo "WARNING: $prof still carries a GSD-DSH-sandbox downgrade block, but a"
+          echo "         sandbox backend is now available — re-run with"
+          echo "         GSD_HOOKS_SANDBOX_PATCH=strip to remove it (then restart dsh web)."
         fi
       done
     fi
@@ -865,5 +977,12 @@ if [ "$WITH_PATCH" = 1 ]; then
     echo "    (gsd-hooks-bridge)。重启 DSH 后守卫生效。"
   else
     echo "  - 钩子桥:未生效!守卫此刻静默关闭——按上方 WARNING 修复,或重跑本脚本后再重启 DSH。"
+  fi
+  if [ "$SBOX_MISSING" = 1 ]; then
+    if [ "$SANDBOX_APPLIED" = 1 ]; then
+      echo "  - 沙箱后端:缺失;已按请求写入 sandbox-policy 降级补丁(重启后钩子可跑,文件沙箱放开)。"
+    else
+      echo "  - 沙箱后端:缺失!钩子将全部 fail-open——按上方 Fix A/B 修复后再重启 DSH。"
+    fi
   fi
 fi
