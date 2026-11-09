@@ -548,8 +548,12 @@ if [ "$WITH_PATCH" = 1 ]; then
         for pdir in "$DSH_HOME"/profiles/*/package.json; do
           [ -f "$pdir" ] || continue
           prof="$(basename "$(dirname "$pdir")")"
-          if DSH_HOME="$DSH_HOME" dsh plugin --profile "$prof" add --save-exact "@deepseek-ai/dsh-hooks-claude-code@$DSH_VER" >/dev/null 2>&1; then
-            note "installed @deepseek-ai/dsh-hooks-claude-code@$DSH_VER into profile '$prof'"
+          # pin the bridge's load-time dependency too: a stale hoisted
+          # dsh-hook-protocol makes the bridge fail to import at DSH startup.
+          if DSH_HOME="$DSH_HOME" dsh plugin --profile "$prof" add --save-exact \
+               "@deepseek-ai/dsh-hooks-claude-code@$DSH_VER" \
+               "@deepseek-ai/dsh-hook-protocol@$DSH_VER" >/dev/null 2>&1; then
+            note "installed @deepseek-ai/dsh-hooks-claude-code@$DSH_VER (+hook-protocol) into profile '$prof'"
           else
             note "WARNING: could not install the bridge into profile '$prof' (dsh plugin add failed)."
           fi
@@ -561,7 +565,7 @@ if [ "$WITH_PATCH" = 1 ]; then
       else
         note "WARNING: hooks bridge not aligned to DSH $DSH_VER — DSH will keep the"
         note "gsd-hooks-bridge row disabled until it matches. Fix manually:"
-        note "  dsh plugin --profile <profile> add --save-exact @deepseek-ai/dsh-hooks-claude-code@$DSH_VER"
+        note "  dsh plugin --profile <profile> add --save-exact @deepseek-ai/dsh-hooks-claude-code@$DSH_VER @deepseek-ai/dsh-hook-protocol@$DSH_VER"
       fi
     fi
   fi
