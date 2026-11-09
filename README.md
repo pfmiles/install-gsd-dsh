@@ -25,9 +25,10 @@ filesystem **skill** provider and the Claude-Code **hooks bridge**.
 > **Unofficial community port.** GSD Core officially supports Claude Code, Codex, OpenCode and
 > other runtimes — not DSH. This script reuses the official installer's own `--claude`
 > passthrough into a throwaway staging directory, then deploys only the surfaces DSH understands,
-> adding a small model-facing adaptation note to every skill. Verified against
-> **DSH 0.2.0-rc.2** (web profile, standard preset) and **GSD Core 1.16.0+**; the
-> hooks-bridge mount was also verified live on DSH 0.2.2-rc.1.
+> adding a small model-facing adaptation note to every skill. Compatibility-tested with
+> **DSH 0.2.2-rc.1** (web profile, standard preset; the mechanism surface was designed against
+> 0.2.0-rc.2 — earlier DSH builds are not guaranteed) and **GSD Core 1.16.0 through v1.20.1**
+> (latest compatibility-tested release: **v1.20.1**).
 
 ---
 
@@ -41,8 +42,8 @@ chmod +x install-gsd-dsh.sh
 
 # 2) Install: skills + engine + hook files + hooks-bridge patch + global CLI
 #    (the hooks patch and global CLI are on by default). GSD_VERSION pins the
-#    release and is required while online; "v1.16.0" also works.
-GSD_VERSION=1.16.0 bash install-gsd-dsh.sh
+#    release and is required while online; "v1.20.1" also works.
+GSD_VERSION=1.20.1 bash install-gsd-dsh.sh
 
 # 3) Restart DSH (dsh web). Skill discovery hot-reloads in running sessions,
 #    but the hooks bridge is mounted at process startup and needs a restart.
@@ -64,7 +65,7 @@ Then, in any DSH session:
   *Rollback* below, or override with `GSD_ALLOW_OLD_NODE` at your own risk).
 - DSH with its default `~/.dsh` data root — or pass the same home DSH actually uses via `DSH_HOME`.
 - DSH's filesystem skill discovery (`dsh-skill-filesystem`) and skill tool: both are present in
-  the standard preset of DSH 0.2.0-rc.2's web profile.
+  the standard preset of the compatibility-tested DSH 0.2.2-rc.1 web profile.
 
 ## What it installs
 
@@ -119,20 +120,20 @@ Every run rebuilds the deployment from the requested version, so upgrade and rol
 **same command** with a different version number:
 
 ```bash
-# Upgrade
-GSD_VERSION=1.17.0 bash install-gsd-dsh.sh
+# Upgrade (e.g. onto the latest compatibility-tested release)
+GSD_VERSION=1.20.1 bash install-gsd-dsh.sh
 
 # Rollback
-GSD_VERSION=1.16.0 bash install-gsd-dsh.sh
+GSD_VERSION=1.19.0 bash install-gsd-dsh.sh
 ```
 
 - `GSD_VERSION` must be set explicitly — the script never defaults it. A leading `v` is fine
-  (`v1.17.0`).
+  (`v1.20.1`).
 - Re-running is idempotent: the deployment surface is rebuilt and the profile patch is never
   appended twice. Upgrades always refresh the full surface — `--no-ghooks` / `--no-npm-bin` are
   ignored in upgrade mode.
 - **Offline:** on an internet-connected machine run
-  `npm pack @opengsd/gsd-core@1.17.0`, unpack the tarball, copy it to the target machine, then:
+  `npm pack @opengsd/gsd-core@1.20.1`, unpack the tarball, copy it to the target machine, then:
   `GSD_PACKAGE_DIR=<unpacked dir> bash install-gsd-dsh.sh`.
 - The toolchain can move freely between versions, but project `.planning/` artifacts do **not**
   auto-downgrade with the engine (GSD's convention is to commit `.planning/` to git) — roll
@@ -265,8 +266,8 @@ bash install-gsd-dsh.sh --uninstall
 | Symptom | Fix |
 |---|---|
 | `ERROR: GSD v1.16+ requires Node >= 24` | Upgrade Node, or install an older tag: `GSD_VERSION=1.15.0 bash install-gsd-dsh.sh` |
-| `ERROR: GSD_VERSION is required for online installs` | Pin the version: `GSD_VERSION=1.16.0 bash install-gsd-dsh.sh` (offline installs may omit it with `GSD_PACKAGE_DIR`) |
-| `ERROR: invalid GSD_VERSION '…'` | Use a semver like `1.17.0`; `v1.17.0` and `1.17.0-rc.1` are also accepted |
+| `ERROR: GSD_VERSION is required for online installs` | Pin the version: `GSD_VERSION=1.20.1 bash install-gsd-dsh.sh` (offline installs may omit it with `GSD_PACKAGE_DIR`) |
+| `ERROR: invalid GSD_VERSION '…'` | Use a semver like `1.20.1`; `v1.20.1` and `1.20.1-rc.1` are also accepted |
 | Skills don't appear in the session | Confirm `DSH_HOME` matches the home DSH actually uses; confirm `skills/gsd-*` files are in place; reopen the session (skill directories hot-reload in running sessions) |
 | Typing `/gsd-*` does nothing | That is DSH's user-invocable skill mechanism; ensure the skill directory is visible (above) and your DSH version supports `/name` invocation |
 | `gsd_run` not found | The global CLI is installed by default; if the script reported `'npm i -g' failed` (npm prefix not writable), call `node $DSH_HOME/gsd-core/bin/gsd-tools.cjs` directly or fix the prefix and re-run `npm i -g @opengsd/gsd-core@<version>` |
@@ -274,16 +275,17 @@ bash install-gsd-dsh.sh --uninstall
 | Startup log: `disabling profile plugin row "gsd-hooks-bridge" … incompatible` | Your DSH was upgraded past the bridge package version. Re-run the installer (it pins the bridge and its `dsh-hook-protocol` dependency to your DSH version automatically) or run `dsh plugin --profile <name> add --save-exact @deepseek-ai/dsh-hooks-claude-code@<your DSH version> @deepseek-ai/dsh-hook-protocol@<your DSH version>`, then restart |
 | Startup log: `failed to import … does not provide an export named 'selectHookGroups'` | Same fix as the line above — the bridge's `dsh-hook-protocol` dependency resolves to a stale hoisted copy; pin both packages to your DSH version and restart |
 | `ERROR: refusing to overwrite` | The target home already has same-named content not managed by this script; move it aside or use a different `DSH_HOME` |
-| `ERROR: fetched version X != requested Y` | Tag typo or npm cache issue; confirm the tag exists (e.g. `1.16.0`) |
+| `ERROR: fetched version X != requested Y` | Tag typo or npm cache issue; confirm the tag exists (e.g. `1.20.1`) |
 | Offline install fails | `GSD_PACKAGE_DIR` must be an npm-layout unpack artifact, not a git clone; a clone needs `npm install && npm run build:lib` first |
 | New hooks don't take effect after an upgrade | The hook list lands per GSD version; when a new GSD release adds hook events, re-run this installer after updating it (the hooks patch is refreshed automatically by default) |
 
 ## Compatibility
 
-- Designed around **DSH 0.2.0-rc.2** (web profile, standard preset); earlier DSH versions are not
-  guaranteed.
-- Any **GSD Core tag from 1.16.0 on** via `GSD_VERSION` (remember the Node ≥ 24 requirement),
-  and older tags for older Node.
+- Latest compatibility-tested: **DSH 0.2.2-rc.1** (web profile, standard preset; the mechanism
+  surface was designed against 0.2.0-rc.2). Earlier DSH versions are not guaranteed.
+- Any **GSD Core tag from 1.16.0 on** via `GSD_VERSION`, with **v1.20.1** the latest
+  compatibility-tested release (remember the Node ≥ 24 requirement), and older tags for older
+  Node.
 - Token-sensitive sessions: install with `GSD_PROFILE=core` first, then add `standard`/`full`.
 
 ## License and credits

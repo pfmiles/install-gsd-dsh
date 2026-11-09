@@ -15,6 +15,8 @@
 #
 # Requirements: bash, node, npm; macOS / Linux / WSL. Native Windows is unsupported
 # (use WSL). GSD v1.16+ requires Node >= 24 — set an older GSD_VERSION for older Node.
+# Compatibility-tested: GSD Core v1.20.1 on DSH 0.2.2-rc.1 (web profile, standard
+# preset). Earlier DSH builds are not guaranteed.
 # GSD_VERSION is REQUIRED for online installs (a leading "v" is tolerated); offline
 # installs may omit it with GSD_PACKAGE_DIR. Every run is a COMPLETE install by
 # default (hooks-bridge patch + global gsd_run CLI); pass --no-ghooks/--no-npm-bin
@@ -24,7 +26,7 @@
 # with the SAME value:  DSH_HOME=<that dir> bash install-gsd-dsh.sh
 #
 # Usage:
-#   GSD_VERSION=1.16.0 bash install-gsd-dsh.sh        # complete install (defaults)
+#   GSD_VERSION=1.20.1 bash install-gsd-dsh.sh        # complete install (defaults)
 #   bash install-gsd-dsh.sh --no-ghooks    # lean: skip hooks-bridge patch
 #   bash install-gsd-dsh.sh --no-npm-bin   # lean: skip global gsd_run CLI
 #   bash install-gsd-dsh.sh --fix-repo     # refresh build outputs under <cwd>/gsd-core/bin
@@ -79,13 +81,13 @@ RAW_GSD_VERSION="${GSD_VERSION:-}"
 if [ -n "$RAW_GSD_VERSION" ]; then
   GSD_VERSION="${RAW_GSD_VERSION#v}"
   if [[ ! "$GSD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-    echo "ERROR: invalid GSD_VERSION '$RAW_GSD_VERSION' — expected a semver like 1.17.0" >&2
-    echo "       (a leading 'v' or a build tag like 1.17.0-rc.1 is allowed)." >&2
+    echo "ERROR: invalid GSD_VERSION '$RAW_GSD_VERSION' — expected a semver like 1.20.1" >&2
+    echo "       (a leading 'v' or a build tag like 1.20.1-rc.1 is allowed)." >&2
     exit 2
   fi
 elif [ "$UNINSTALL" != 1 ] && [ -z "${GSD_PACKAGE_DIR:-}" ]; then
   echo "ERROR: GSD_VERSION is required for online installs. Pin the version, e.g." >&2
-  echo "    GSD_VERSION=1.16.0 bash install-gsd-dsh.sh" >&2
+  echo "    GSD_VERSION=1.20.1 bash install-gsd-dsh.sh" >&2
   echo "  (offline installs may omit it when GSD_PACKAGE_DIR is set.)" >&2
   exit 2
 else
