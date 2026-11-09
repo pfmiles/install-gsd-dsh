@@ -204,6 +204,9 @@ fi
 _TMP_BASE="${TMPDIR:-/tmp}"; _TMP_BASE="${_TMP_BASE%/}"
 STAGING="$(mktemp -d "$_TMP_BASE/gsd-dsh-staging.XXXXXX")"
 WORK="$(mktemp -d "$_TMP_BASE/gsd-dsh-pkg.XXXXXX")"
+# abort-safe hygiene: every failure path still removes the staging trees, so a
+# re-run starts clean and aborted attempts leave no litter behind
+trap 'rm -rf "$STAGING" "$WORK"' EXIT
 
 # ---------------------------------------------------------------------------
 # 1/6 source the official package: network (npm pack) or offline (GSD_PACKAGE_DIR)
