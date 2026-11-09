@@ -164,9 +164,12 @@ secret-read hard-blocks, commit-convention validation, and more.
   each profile's `cordis.patch.yml` (the patch layer is created if the profile has none). The
   installer detects the bridge package in each profile's own `node_modules` first and the shared
   hoisted store second, and after every run it **verifies** that
-  `dsh --profile <name> --dump-config` contains `gsd-hooks-bridge` and that the bridge imports
-  from the profile tree — a silent "installed but never mounted" state now ends the run with an
-  explicit WARNING (which prints the exact block to append by hand) instead of passing silently.
+  `dsh --profile <name> --dump-config` contains `gsd-hooks-bridge` with its `configPath` pointing
+  at the deployed `gsd-hooks.dsh.json`, and that the bridge imports from the profile tree. Any
+  non-canonical bridge block (a hand-appended insert, an older installer's `!!js` form) is
+  **rewritten to canonical form**, so re-running the script self-heals a half-fixed machine; a
+  silent "installed but never mounted" state ends the run with an explicit WARNING (which prints
+  the exact block to append by hand) instead of passing silently.
 - The patch block is wrapped in `# GSD-DSH-bridge BEGIN/END` markers; `--uninstall` strips it
   automatically (leaving a backup).
 - If no bridge plugin package can be found (checked in every profile's node_modules and the
@@ -191,11 +194,12 @@ secret-read hard-blocks, commit-convention validation, and more.
    `@path` references / `$ARGUMENTS` (see *Limitations*).
 4. **Append** the hooks-bridge mount block to each profile's `cordis.patch.yml` (on by default;
    skipped with `--no-ghooks` on fresh installs; the patch layer is created if the profile has
-   none; begin/end-marked, backed up before every write), **align the bridge plugin version with
-   the running DSH** so DSH's version gate won't disable the row — then **verify the mount**:
-   every profile's merged config must contain `gsd-hooks-bridge` and the bridge must import from
-   the profile tree, or the run ends with an explicit WARNING (`dsh plugin add` installs; it
-   never mounts — mounting is this patch alone).
+   none; begin/end-marked, backed up before every write; foreign/historic bridge blocks are
+   rewritten to canonical form), **align the bridge plugin version with the running DSH** so
+   DSH's version gate won't disable the row — then **verify the mount**: every profile's merged
+   config must contain `gsd-hooks-bridge` with the deployed `configPath`, and the bridge must
+   import from the profile tree, or the run ends with an explicit WARNING (`dsh plugin add`
+   installs; it never mounts — mounting is this patch alone).
 
 ## What works — and the honest limitations
 
@@ -266,7 +270,7 @@ bash install-gsd-dsh.sh --uninstall
 | Skills don't appear in the session | Confirm `DSH_HOME` matches the home DSH actually uses; confirm `skills/gsd-*` files are in place; reopen the session (skill directories hot-reload in running sessions) |
 | Typing `/gsd-*` does nothing | That is DSH's user-invocable skill mechanism; ensure the skill directory is visible (above) and your DSH version supports `/name` invocation |
 | `gsd_run` not found | The global CLI is installed by default; if the script reported `'npm i -g' failed` (npm prefix not writable), call `node $DSH_HOME/gsd-core/bin/gsd-tools.cjs` directly or fix the prefix and re-run `npm i -g @opengsd/gsd-core@<version>` |
-| Hooks bridge has no effect | First restart `dsh web` (the patch mounts at process startup). If it still does nothing, run `dsh --profile <name> --dump-config | grep gsd-hooks-bridge`: a **missing row = installed but never mounted** — re-run this installer (it now appends the mount block to every profile's `cordis.patch.yml`, verifies the merged config before finishing, and its WARNING prints the exact block to append by hand), then restart |
+| Hooks bridge has no effect | First restart `dsh web` (the patch mounts at process startup). If it still does nothing, run `dsh --profile <name> --dump-config | grep gsd-hooks-bridge`: a **missing row = installed but never mounted**, a row whose `configPath` is not your `$DSH_HOME/gsd-hooks.dsh.json` = a stale or hand-edited block — in both cases re-run this installer (it rewrites the mount block in every profile's `cordis.patch.yml` to canonical form and verifies the merged config before finishing; its WARNING prints the exact block to append by hand), then restart |
 | Startup log: `disabling profile plugin row "gsd-hooks-bridge" … incompatible` | Your DSH was upgraded past the bridge package version. Re-run the installer (it pins the bridge and its `dsh-hook-protocol` dependency to your DSH version automatically) or run `dsh plugin --profile <name> add --save-exact @deepseek-ai/dsh-hooks-claude-code@<your DSH version> @deepseek-ai/dsh-hook-protocol@<your DSH version>`, then restart |
 | Startup log: `failed to import … does not provide an export named 'selectHookGroups'` | Same fix as the line above — the bridge's `dsh-hook-protocol` dependency resolves to a stale hoisted copy; pin both packages to your DSH version and restart |
 | `ERROR: refusing to overwrite` | The target home already has same-named content not managed by this script; move it aside or use a different `DSH_HOME` |

@@ -607,30 +607,70 @@ if [ "$WITH_PATCH" = 1 ]; then
         note "created $prof (profile '$(basename "$pdir")' had no patch layer)"
       fi
       if grep -q 'gsd-hooks-bridge' "$prof"; then
-        # retrofit BEGIN/END markers around a pre-marker block for clean later uninstall
+        # Any bridge block without BOTH canonical markers is foreign (a manual
+        # insert) or historic (an older installer or a !!js configPath): strip
+        # it and rewrite the canonical block so a re-run converges the patch.
         NODE_RETRO="$(mktemp)"
         cat > "$NODE_RETRO" <<'EOF'
 const fs = require('fs');
 const f = process.argv[2];
 const B = '# GSD-DSH-bridge BEGIN', E = '# GSD-DSH-bridge END';
+const NEEDLE = 'gsd-hooks-bridge';
 let s = fs.readFileSync(f, 'utf8');
 const before = s;
-if (!s.includes(B)) {
-  const anchor = '# GSD hooks bridge (added by install-gsd-dsh.sh)';
-  const i = s.indexOf(anchor);
-  if (i >= 0) s = s.slice(0, i) + B + '\n' + s.slice(i);
+let changed = false;
+if (!(s.includes(B) && s.includes(E))) {
+  // remove foreign/historic entries: only top-level "- insert:" items whose
+  // span contains the needle (or bare needle lines), plus any GSD comment line
+  // clinging above them
+  let lines = s.split('\n');
+  for (let i = 0; i < lines.length; ) {
+    const isInsert = lines[i].trim() === '- insert:';
+    const nextTop = isInsert ? lines.findIndex((l, k) => k > i && /^- /.test(l)) : -1;
+    const span = isInsert ? lines.slice(i, nextTop === -1 ? lines.length : nextTop).join('\n') : '';
+    const targeted = isInsert ? span.includes(NEEDLE) : lines[i].includes(NEEDLE);
+    if (targeted) {
+      const endIdx = nextTop === -1 ? lines.length : nextTop;
+      let startIdx = i;
+      while (startIdx > 0) {
+        const t = lines[startIdx - 1].trim();
+        if (/^# GSD/.test(t) || /^# GSD-DSH-bridge/.test(t) || t === '') startIdx--;
+        else break;
+      }
+      lines.splice(startIdx, endIdx - startIdx);
+      changed = true;
+      i = startIdx;
+      continue;
+    }
+    i = isInsert ? (nextTop === -1 ? lines.length : nextTop) : i + 1;
+  }
+  s = lines.join('\n');
 }
-if (!s.includes(E)) s = s.replace(/\s*$/, '\n') + E + '\n';
-if (s !== before) {
+if (!(s.includes(B) && s.includes(E))) {
+  s = s.replace(/\s*$/, '\n\n') + [
+    B,
+    '# GSD hooks bridge (added by install-gsd-dsh.sh)',
+    '- insert:',
+    '    - id: gsd-hooks-bridge',
+    "      name: '@deepseek-ai/dsh-hooks-claude-code'",
+    '      config:',
+    "        configPath: '" + process.env.GSD_HOME + "/gsd-hooks.dsh.json'",
+    "        pluginRoot: '" + process.env.GSD_HOME + "'",
+    '        defaultTimeoutMs: 300000',
+    E,
+  ].join('\n') + '\n';
+  changed = true;
+}
+if (changed) {
   fs.copyFileSync(f, f + '.bak.' + Date.now());
   fs.writeFileSync(f, s);
-  console.log('markers refreshed: ' + f);
+  console.log('bridge block rewritten to canonical form: ' + f);
 } else {
-  console.log('markers already present: ' + f);
+  console.log('bridge block already canonical: ' + f);
 }
 EOF
-        node "$NODE_RETRO" "$prof"; rm -f "$NODE_RETRO"
-        note "bridge already present in $prof — skipped (marker check done)"
+        GSD_HOME="$DSH_HOME" node "$NODE_RETRO" "$prof"; rm -f "$NODE_RETRO"
+        note "bridge block checked in $prof"
         PATCHED=1
       else
         cp "$prof" "$prof.bak.$(date +%s)"
@@ -663,12 +703,15 @@ EOF
     for pdir in $PROFILES_LIST; do
       pname="$(basename "$pdir")"
       if command -v dsh >/dev/null 2>&1; then
-        if DSH_HOME="$DSH_HOME" dsh --profile "$pname" --dump-config 2>/dev/null | grep -q 'gsd-hooks-bridge'; then
+        CFG_OUT="$(DSH_HOME="$DSH_HOME" dsh --profile "$pname" --dump-config 2>/dev/null || true)"
+        if printf '%s\n' "$CFG_OUT" | grep -q 'gsd-hooks-bridge' && \
+           printf '%s\n' "$CFG_OUT" | grep -A8 'gsd-hooks-bridge' | grep -qF "configPath: $DSH_HOME/gsd-hooks.dsh.json"; then
           HOOKS_OK=1
-          note "verified: gsd-hooks-bridge in merged config of profile '$pname'"
+          note "verified: gsd-hooks-bridge in merged config of profile '$pname' (configPath OK)"
         else
-          echo "WARNING: gsd-hooks-bridge is NOT in the merged config of profile '$pname'."
-          echo "         manual fix — append to $pdir/cordis.patch.yml:"
+          echo "WARNING: gsd-hooks-bridge NOT confirmed in the merged config of profile '$pname'"
+          echo "         (row missing, or its configPath does not point at $DSH_HOME/gsd-hooks.dsh.json)."
+          echo "         manual fix — append/replace in $pdir/cordis.patch.yml:"
           echo "           - insert:"
           echo "               - id: gsd-hooks-bridge"
           echo "                 name: '@deepseek-ai/dsh-hooks-claude-code'"
