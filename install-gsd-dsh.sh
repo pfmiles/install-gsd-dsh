@@ -224,6 +224,24 @@ EOF
   rm -f "$NODE_SSTRIP"
 }
 
+# Version of the installed dsh-hook-protocol (the bridge's load-time dependency).
+# Same profile-local-first probing as bridge_version(): a stale hoisted copy
+# makes the bridge fail to import at DSH startup.
+protocol_version() {
+  local bp v
+  for bp in "$DSH_HOME"/profiles/*/node_modules; do
+    if [ -f "$bp/@deepseek-ai/dsh-hook-protocol/package.json" ]; then
+      v="$(node -p "require('$bp/@deepseek-ai/dsh-hook-protocol/package.json').version" 2>/dev/null || true)"
+      if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+    fi
+  done
+  if [ -f "$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh-hook-protocol/package.json" ]; then
+    v="$(node -p "require('$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh-hook-protocol/package.json').version" 2>/dev/null || true)"
+    if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  fi
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Uninstall (marker-aware)
 # ---------------------------------------------------------------------------
@@ -635,14 +653,21 @@ if [ "$WITH_PATCH" = 1 ]; then
   # in lockstep with DSH (GSD_NO_BRIDGE_SYNC=1 opts out; failure never aborts).
   DSH_VER="$(dsh_version || true)"
   BRIDGE_VER="$(bridge_version || true)"
+  PROTO_VER="$(protocol_version || true)"
   if [ -n "$DSH_VER" ] && [ "${GSD_NO_BRIDGE_SYNC:-0}" != 1 ]; then
-    if [ "$BRIDGE_VER" = "$DSH_VER" ]; then
-      note "hooks bridge plugin matches DSH $DSH_VER — in sync."
+    if [ "$BRIDGE_VER" = "$DSH_VER" ] && [ "$PROTO_VER" = "$DSH_VER" ]; then
+      note "hooks bridge plugin + its dsh-hook-protocol match DSH $DSH_VER — in sync."
     else
       if [ -z "$BRIDGE_VER" ]; then
         note "hooks bridge plugin not installed (DSH $DSH_VER) — installing."
-      else
+      elif [ "$BRIDGE_VER" != "$DSH_VER" ]; then
         note "hooks bridge $BRIDGE_VER != DSH $DSH_VER — DSH would disable the row; aligning."
+      fi
+      if [ -z "$PROTO_VER" ]; then
+        note "dsh-hook-protocol not installed — installing at $DSH_VER."
+      elif [ "$PROTO_VER" != "$DSH_VER" ]; then
+        note "dsh-hook-protocol $PROTO_VER != DSH $DSH_VER — a stale copy breaks the"
+        note "bridge import; aligning."
       fi
       if command -v dsh >/dev/null 2>&1; then
         for pdir in "$DSH_HOME"/profiles/*/package.json; do
@@ -659,11 +684,12 @@ if [ "$WITH_PATCH" = 1 ]; then
           fi
         done
         BRIDGE_VER="$(bridge_version || true)"
+        PROTO_VER="$(protocol_version || true)"
       fi
-      if [ "$BRIDGE_VER" = "$DSH_VER" ]; then
-        note "hooks bridge plugin aligned to $DSH_VER."
+      if [ "$BRIDGE_VER" = "$DSH_VER" ] && [ "$PROTO_VER" = "$DSH_VER" ]; then
+        note "hooks bridge plugin + hook-protocol aligned to $DSH_VER."
       else
-        note "WARNING: hooks bridge not aligned to DSH $DSH_VER — DSH will keep the"
+        note "WARNING: hooks bridge not aligned with DSH $DSH_VER — DSH will keep the"
         note "gsd-hooks-bridge row disabled until it matches. Fix manually:"
         note "  dsh plugin --profile <profile> add --save-exact @deepseek-ai/dsh-hooks-claude-code@$DSH_VER @deepseek-ai/dsh-hook-protocol@$DSH_VER"
       fi
@@ -822,12 +848,30 @@ EOF
         note "dsh CLI not on PATH — skipped merged-config check ($pname)."
         note "restart DSH, then verify: dsh --profile $pname --dump-config | grep gsd-hooks-bridge"
       fi
-      if ! (cd "$pdir" && node -e "require('@deepseek-ai/dsh-hooks-claude-code')" >/dev/null 2>&1); then
-        echo "WARNING: @deepseek-ai/dsh-hooks-claude-code does not import from profile '$pname'"
-        echo "         (usually a stale hoisted @deepseek-ai/dsh-hook-protocol)."
-        echo "         fix: dsh plugin --profile $pname add --save-exact"
-        echo "              @deepseek-ai/dsh-hooks-claude-code@<DSH-version>"
-        echo "              @deepseek-ai/dsh-hook-protocol@<DSH-version>"
+      BRIDGE_RES=""
+      ok_smoke=1
+      BRIDGE_RES="$(cd "$pdir" && node -e "process.stdout.write(require.resolve('@deepseek-ai/dsh-hooks-claude-code'))" 2>/dev/null)" || ok_smoke=0
+      if [ "$ok_smoke" = 1 ]; then
+        # ESM import, matching how DSH's loader consumes the package — a plain
+        # require() reads bridge packages as CJS and produces false
+        # ERR_REQUIRE_ESM failures on Node < 22.12.
+        (cd "$pdir" && node --input-type=module -e "await import('@deepseek-ai/dsh-hooks-claude-code')" >/dev/null 2>&1) || ok_smoke=0
+      fi
+      if [ "$ok_smoke" != 1 ]; then
+        if [ -z "$BRIDGE_RES" ]; then
+          echo "WARNING: @deepseek-ai/dsh-hooks-claude-code is not resolvable from"
+          echo "         profile '$pname' — it is missing from its node_modules tree."
+          echo "         fix: dsh plugin --profile $pname add --save-exact"
+          echo "              @deepseek-ai/dsh-hooks-claude-code@<DSH-version>"
+          echo "              @deepseek-ai/dsh-hook-protocol@<DSH-version>"
+        else
+          echo "WARNING: $BRIDGE_RES resolves but fails to import from profile"
+          echo "         '$pname' — usually a stale hoisted @deepseek-ai/dsh-hook-protocol"
+          echo "         or an incompatible bridge build."
+          echo "         fix: dsh plugin --profile $pname add --save-exact"
+          echo "              @deepseek-ai/dsh-hooks-claude-code@<DSH-version>"
+          echo "              @deepseek-ai/dsh-hook-protocol@<DSH-version>"
+        fi
       fi
     done
 
