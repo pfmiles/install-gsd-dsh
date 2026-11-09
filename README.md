@@ -213,9 +213,11 @@ secret-read hard-blocks, commit-convention validation, and more.
    none; begin/end-marked, backed up before every write; foreign/historic bridge blocks are
    rewritten to canonical form), **align the bridge plugin version with the running DSH** so
    DSH's version gate won't disable the row — then **verify the mount**: every profile's merged
-   config must contain `gsd-hooks-bridge` with the deployed `configPath`, and the bridge must
-   import from the profile tree, or the run ends with an explicit WARNING (`dsh plugin add`
-   installs; it never mounts — mounting is this patch alone).
+   config must contain `gsd-hooks-bridge` with the deployed `configPath`, and the bridge package
+   must resolve from the profile tree (a deep-import smoke also runs, but missing DSH framework
+   peers such as `dsh-llm` are only informational there — plain node cannot supply what DSH's own
+   loader injects; the definitive confirmation is the startup log), or the run ends with an
+   explicit WARNING (`dsh plugin add` installs; it never mounts — mounting is this patch alone).
 
 ## What works — and the honest limitations
 

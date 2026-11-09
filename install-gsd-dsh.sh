@@ -849,29 +849,27 @@ EOF
         note "restart DSH, then verify: dsh --profile $pname --dump-config | grep gsd-hooks-bridge"
       fi
       BRIDGE_RES=""
-      ok_smoke=1
-      BRIDGE_RES="$(cd "$pdir" && node -e "process.stdout.write(require.resolve('@deepseek-ai/dsh-hooks-claude-code'))" 2>/dev/null)" || ok_smoke=0
-      if [ "$ok_smoke" = 1 ]; then
-        # ESM import, matching how DSH's loader consumes the package — a plain
-        # require() reads bridge packages as CJS and produces false
-        # ERR_REQUIRE_ESM failures on Node < 22.12.
-        (cd "$pdir" && node --input-type=module -e "await import('@deepseek-ai/dsh-hooks-claude-code')" >/dev/null 2>&1) || ok_smoke=0
+      BRIDGE_RES="$(cd "$pdir" && node -e "process.stdout.write(require.resolve('@deepseek-ai/dsh-hooks-claude-code'))" 2>/dev/null)" || BRIDGE_RES=""
+      if [ -z "$BRIDGE_RES" ]; then
+        echo "WARNING: @deepseek-ai/dsh-hooks-claude-code is not resolvable from"
+        echo "         profile '$pname' — it is missing from its node_modules tree."
+        echo "         fix: dsh plugin --profile $pname add --save-exact"
+        echo "              @deepseek-ai/dsh-hooks-claude-code@<DSH-version>"
+        echo "              @deepseek-ai/dsh-hook-protocol@<DSH-version>"
+        continue
       fi
-      if [ "$ok_smoke" != 1 ]; then
-        if [ -z "$BRIDGE_RES" ]; then
-          echo "WARNING: @deepseek-ai/dsh-hooks-claude-code is not resolvable from"
-          echo "         profile '$pname' — it is missing from its node_modules tree."
-          echo "         fix: dsh plugin --profile $pname add --save-exact"
-          echo "              @deepseek-ai/dsh-hooks-claude-code@<DSH-version>"
-          echo "              @deepseek-ai/dsh-hook-protocol@<DSH-version>"
-        else
-          echo "WARNING: $BRIDGE_RES resolves but fails to import from profile"
-          echo "         '$pname' — usually a stale hoisted @deepseek-ai/dsh-hook-protocol"
-          echo "         or an incompatible bridge build."
-          echo "         fix: dsh plugin --profile $pname add --save-exact"
-          echo "              @deepseek-ai/dsh-hooks-claude-code@<DSH-version>"
-          echo "              @deepseek-ai/dsh-hook-protocol@<DSH-version>"
-        fi
+      if (cd "$pdir" && node --input-type=module -e "await import('@deepseek-ai/dsh-hooks-claude-code')" >/dev/null 2>&1); then
+        note "import smoke passed for profile '$pname'"
+      else
+        # Plain node cannot resolve the DSH framework peers the bridge imports
+        # (e.g. @deepseek-ai/dsh-llm) — only DSH's own loader supplies them —
+        # so an import failure here is expected outside DSH and is NOT by
+        # itself a fault. The definitive check is the DSH startup log after a
+        # restart: no 'failed to import' on the gsd-hooks-bridge row.
+        note "INFO: deep-import smoke failed for profile '$pname' — usually not a fault:"
+        note "the bridge imports DSH framework peers (e.g. @deepseek-ai/dsh-llm) that only"
+        note "the DSH loader can resolve. Real check: restart dsh web and confirm there is"
+        note "no 'failed to import' line for gsd-hooks-bridge in its startup log."
       fi
     done
 
