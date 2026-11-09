@@ -16,22 +16,22 @@
 # Requirements: bash, node, npm; macOS / Linux / WSL. Native Windows is unsupported
 # (use WSL). GSD v1.16+ requires Node >= 24 — set an older GSD_VERSION for older Node.
 # GSD_VERSION is REQUIRED for online installs (a leading "v" is tolerated); offline
-# installs may omit it with GSD_PACKAGE_DIR. Re-running over an existing deployment
-# is upgrade mode and always refreshes the full surface (hook patch + global CLI),
-# so an upgrade can never be partial. If your DSH uses a custom home (DSH_HOME env
-# or configured path), run this script with the SAME value:
-#   DSH_HOME=<that dir> bash install-gsd-dsh.sh
+# installs may omit it with GSD_PACKAGE_DIR. Every run is a COMPLETE install by
+# default (hooks-bridge patch + global gsd_run CLI); pass --no-ghooks/--no-npm-bin
+# for a lean fresh install. Re-running over an existing deployment is upgrade mode
+# and always refreshes the full surface, so an upgrade can never be partial.
+# If your DSH uses a custom home (DSH_HOME env or configured path), run this script
+# with the SAME value:  DSH_HOME=<that dir> bash install-gsd-dsh.sh
 #
 # Usage:
-#   GSD_VERSION=1.16.0 bash install-gsd-dsh.sh        # stage + deploy (+hook files)
-#   GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks  # + hooks-bridge patch
-#   GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --npm-bin      # + global gsd_run CLI
+#   GSD_VERSION=1.16.0 bash install-gsd-dsh.sh        # complete install (defaults)
+#   bash install-gsd-dsh.sh --no-ghooks    # lean: skip hooks-bridge patch
+#   bash install-gsd-dsh.sh --no-npm-bin   # lean: skip global gsd_run CLI
 #   bash install-gsd-dsh.sh --fix-repo     # refresh build outputs under <cwd>/gsd-core/bin
 #   bash install-gsd-dsh.sh --uninstall    # remove everything this script deployed
 #   bash install-gsd-dsh.sh --help
 #
-# Upgrade:   GSD_VERSION=1.17.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin
-# Rollback:  GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin
+# Upgrade / Rollback:  GSD_VERSION=<tag> bash install-gsd-dsh.sh   (same command)
 #
 # Environment:
 #   GSD_VERSION             target version tag — REQUIRED for online installs
@@ -46,15 +46,21 @@ set -euo pipefail
 
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 
-WITH_PATCH=0
-NPM_BIN=0
+# Complete-by-default: hooks patch + global CLI are ON for every run. The two
+# --no-* flags opt into a LEAN fresh install; upgrade mode ignores them.
+WITH_PATCH=1
+NPM_BIN=1
+DECLINED_PATCH=0
+DECLINED_BIN=0
 UNINSTALL=0
 FIX_REPO=0
 for a in "$@"; do
   case "$a" in
     -h|--help)  sed -n '2,34p' "$0"; exit 0 ;;
-    --with-ghooks) WITH_PATCH=1 ;;
-    --npm-bin)     NPM_BIN=1 ;;
+    --with-ghooks) DECLINED_PATCH=0 ;;
+    --npm-bin)     DECLINED_BIN=0 ;;
+    --no-ghooks)   DECLINED_PATCH=1 ;;
+    --no-npm-bin)  DECLINED_BIN=1 ;;
     --uninstall)   UNINSTALL=1 ;;
     --fix-repo)    FIX_REPO=1 ;;
     *) echo "unknown arg: $a (see --help)"; exit 2 ;;
@@ -77,7 +83,7 @@ if [ -n "$RAW_GSD_VERSION" ]; then
   fi
 elif [ "$UNINSTALL" != 1 ] && [ -z "${GSD_PACKAGE_DIR:-}" ]; then
   echo "ERROR: GSD_VERSION is required for online installs. Pin the version, e.g." >&2
-  echo "    GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin" >&2
+  echo "    GSD_VERSION=1.16.0 bash install-gsd-dsh.sh" >&2
   echo "  (offline installs may omit it when GSD_PACKAGE_DIR is set.)" >&2
   exit 2
 else
@@ -213,13 +219,21 @@ CLAUDE_CONFIG_DIR="$STAGING" node "$PKG_DIR/bin/install.js" "${INSTALLER_ARGS[@]
 # ---------------------------------------------------------------------------
 # Existing managed deployment => upgrade/rollback mode: refresh the FULL surface
 # by default (hook patch + global CLI), so an upgrade can never be partial.
+# Existing managed deployment => upgrade/rollback mode: the full surface is
+# mandatory, so an upgrade can never be partial (lean opt-outs are ignored).
 if [ -e "$DSH_HOME/gsd-core/$MARKER" ] || ls "$DSH_HOME"/skills/gsd-* >/dev/null 2>&1; then
-  if [ "$WITH_PATCH" != 1 ] || [ "$NPM_BIN" != 1 ]; then
-    WITH_PATCH=1
-    NPM_BIN=1
-    note "existing GSD deployment found — upgrade mode: --with-ghooks + --npm-bin"
-    note "enabled automatically so the hooks patch and global CLI refresh too."
+  UPGRADING=1
+  WITH_PATCH=1
+  NPM_BIN=1
+  if [ "$DECLINED_PATCH" = 1 ] || [ "$DECLINED_BIN" = 1 ]; then
+    note "existing GSD deployment found — upgrade mode: full surface is mandatory"
+    note "(--no-ghooks / --no-npm-bin are ignored for upgrades)."
+  else
+    note "existing GSD deployment found — upgrade mode: refreshing the full surface."
   fi
+else
+  [ "$DECLINED_PATCH" = 1 ] && WITH_PATCH=0
+  [ "$DECLINED_BIN"  = 1 ] && NPM_BIN=0
 fi
 
 banner "3/6 deploy -> $DSH_HOME"
@@ -548,10 +562,16 @@ fi
 
 if [ "$NPM_BIN" = 1 ]; then
   banner "npm global bin (gsd_run / gsd-tools / gsd-mcp-server)"
-  npm install -g "@opengsd/gsd-core@$GSD_VERSION"
-  if ! command -v gsd_run >/dev/null; then
-    PREFIX="$(npm config get prefix 2>/dev/null || true)"
-    note "WARNING: gsd_run not on PATH — add it: export PATH=\"${PREFIX:-<npm-prefix>}/bin:\$PATH\""
+  if npm install -g "@opengsd/gsd-core@$GSD_VERSION"; then
+    if ! command -v gsd_run >/dev/null; then
+      PREFIX="$(npm config get prefix 2>/dev/null || true)"
+      note "WARNING: gsd_run not on PATH — add it: export PATH=\"${PREFIX:-<npm-prefix>}/bin:\$PATH\""
+    fi
+  else
+    note "WARNING: 'npm i -g' failed (npm prefix not writable?) — the payload engine"
+    note "is installed regardless; call it with:"
+    note "  node $DSH_HOME/gsd-core/bin/gsd-tools.cjs"
+    note "  (or fix your npm prefix, then: npm i -g @opengsd/gsd-core@$GSD_VERSION)"
   fi
 else
   note "(skip) for gsd_run on PATH run: npm i -g @opengsd/gsd-core@$GSD_VERSION"

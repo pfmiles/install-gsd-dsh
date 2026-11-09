@@ -11,13 +11,13 @@ filesystem **skill** provider and the Claude-Code **hooks bridge**.
 
 - **One command everything:** ~72 `gsd-*` skills (`/gsd-health`, `/gsd-new-project`,
   `/gsd-plan-phase`, `/gsd-execute-phase`, …), the GSD engine payload, hook scripts, the
-  hooks-bridge profile patch, and optionally the global `gsd_run` CLI.
+  hooks-bridge profile patch and the global `gsd_run` CLI — all on by default.
 - **Version-pinned and idempotent:** `GSD_VERSION` is required for online installs (a `v`
   prefix is tolerated, and the fetched version is cross-checked against the requested one).
   Upgrade and rollback are the same command with a different version number.
-- **No partial upgrades:** re-running over an existing deployment is detected as upgrade mode
-  and always refreshes the full surface — the hooks patch and the global CLI are enabled
-  automatically.
+- **Complete by default, no partial upgrades:** every run installs the hooks patch and the global
+  CLI unless you opt out with `--no-ghooks` / `--no-npm-bin` (fresh installs only). Upgrades over
+  an existing deployment always refresh the full surface.
 - **Safe:** `--uninstall` removes only what the script itself manages and never touches your
   other `~/.dsh` content; install refuses to overwrite directories it does not manage.
 - **Supported:** macOS, Linux, WSL (bash). Native Windows is not supported.
@@ -39,8 +39,9 @@ curl -fsSL https://raw.githubusercontent.com/pfmiles/install-gsd-dsh/main/instal
 chmod +x install-gsd-dsh.sh
 
 # 2) Install: skills + engine + hook files + hooks-bridge patch + global CLI
-#    GSD_VERSION pins the release (required while online); "v1.16.0" also works.
-GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin
+#    (the hooks patch and global CLI are on by default). GSD_VERSION pins the
+#    release and is required while online; "v1.16.0" also works.
+GSD_VERSION=1.16.0 bash install-gsd-dsh.sh
 
 # 3) Restart DSH (dsh web). Skill discovery hot-reloads in running sessions,
 #    but the hooks bridge is mounted at process startup and needs a restart.
@@ -51,7 +52,8 @@ Then, in any DSH session:
 - type `/gsd-health` (or let the model call the `gsd-health` skill) to confirm the skills are live;
 - new project → `/gsd-new-project`; existing repo → `/gsd-onboard`;
 - in a POSIX terminal: `gsd_run runtime-identity --raw` should print
-  `{"packageName":"@opengsd/gsd-core", ...}` with the installed version (when `--npm-bin` was used).
+  `{"packageName":"@opengsd/gsd-core", ...}` with the installed version (the global CLI is
+  installed by default; it is omitted only with `--no-npm-bin`).
 
 ## Requirements
 
@@ -72,7 +74,7 @@ Then, in any DSH session:
 | `hooks/` + `hooks/dsh-gsd-suite/run.cjs` | GSD hook scripts + a DSH tool-name adapter | guards wired through the hooks bridge (see below) |
 | `scripts/` | package-level scripts | required by the engine at runtime |
 | `gsd-hooks.dsh.json` | hooks-bridge config with DSH tool-name matchers | read by the bridge |
-| `profiles/*/cordis.patch.yml` (only with `--with-ghooks`) | appended bridge-mount section | makes the hooks effective in DSH sessions |
+| `profiles/*/cordis.patch.yml` (default; skip with `--no-ghooks`) | appended bridge-mount section | makes the hooks effective in DSH sessions |
 
 The script **never** touches: `~/.claude`, your project files, the rest of your DSH configuration
 (except the profiles patch above), or any skill not prefixed `gsd-*`.
@@ -83,16 +85,18 @@ The script **never** touches: `~/.claude`, your project files, the rest of your 
 
 | Option | Effect |
 |---|---|
-| *(none)* | Deploy skills + engine + hook scripts/config (no profile patch, no npm global package) |
-| `--with-ghooks` | Append the hooks-bridge mount block to `$DSH_HOME/profiles/*/cordis.patch.yml` (backed up automatically) |
-| `--npm-bin` | `npm i -g @opengsd/gsd-core@<version>` so `gsd_run` / `gsd-tools` land on `PATH` |
+| *(none)* | **Complete install (default):** skills + engine + hook scripts, hooks-bridge profile patch and global `gsd_run` CLI |
+| `--with-ghooks` | Explicitly enable the hooks-bridge patch (already the default; kept for compatibility) |
+| `--npm-bin` | Explicitly enable the npm global CLI (already the default; kept for compatibility) |
+| `--no-ghooks` | Lean fresh install: skip the hooks-bridge profile patch |
+| `--no-npm-bin` | Lean fresh install: skip the npm global CLI |
 | `--fix-repo` | Only meaningful inside a `gsd-core` source checkout: refresh the build outputs in the repo |
 | `--uninstall` | Remove everything this script deployed (only its own managed files, see *Uninstall*) |
 | `-h` / `--help` | Usage |
 
-When an existing deployment is detected, the run is treated as an **upgrade**: `--with-ghooks`
-and `--npm-bin` are switched on automatically (no flag can disable them), so the hooks patch,
-bridge config and the `gsd_run` CLI always move together with the engine.
+Every run is complete by default. The `--no-*` flags opt into a lean **fresh** install (e.g. CI
+staging). When an existing deployment is detected the run is an **upgrade**, and the lean opt-outs
+are ignored: the hooks patch, bridge config and the `gsd_run` CLI always move with the engine.
 
 ### Environment variables
 
@@ -112,33 +116,34 @@ Every run rebuilds the deployment from the requested version, so upgrade and rol
 
 ```bash
 # Upgrade
-GSD_VERSION=1.17.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin
+GSD_VERSION=1.17.0 bash install-gsd-dsh.sh
 
 # Rollback
-GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin
+GSD_VERSION=1.16.0 bash install-gsd-dsh.sh
 ```
 
 - `GSD_VERSION` must be set explicitly — the script never defaults it. A leading `v` is fine
   (`v1.17.0`).
 - Re-running is idempotent: the deployment surface is rebuilt and the profile patch is never
-  appended twice. Running over an existing deployment is upgrade mode and always refreshes the
-  full surface — the hooks patch and the global CLI are refreshed automatically even if you omit
-  `--with-ghooks` / `--npm-bin`.
+  appended twice. Upgrades always refresh the full surface — `--no-ghooks` / `--no-npm-bin` are
+  ignored in upgrade mode.
 - **Offline:** on an internet-connected machine run
   `npm pack @opengsd/gsd-core@1.17.0`, unpack the tarball, copy it to the target machine, then:
-  `GSD_PACKAGE_DIR=<unpacked dir> bash install-gsd-dsh.sh --npm-bin`.
+  `GSD_PACKAGE_DIR=<unpacked dir> bash install-gsd-dsh.sh`.
 - The toolchain can move freely between versions, but project `.planning/` artifacts do **not**
   auto-downgrade with the engine (GSD's convention is to commit `.planning/` to git) — roll
   project state back with git if a downgrade complains about state formats.
 - **Do not** use GSD's built-in `/gsd-update` skill: it installs along the official runtimes'
   paths (into `~/.claude`) and does not know about DSH. This script is the upgrade path on DSH.
 
-## Hooks bridge (optional, `--with-ghooks`)
+## Hooks bridge (on by default)
 
-The patch written by `--with-ghooks` mounts `@deepseek-ai/dsh-hooks-claude-code` at DSH startup,
-enabling GSD's lifecycle guards: prompt-injection scanning, read-before-write hints, secret-read
-hard-blocks, commit-convention validation, and more.
+The installer mounts `@deepseek-ai/dsh-hooks-claude-code` at DSH startup by writing a profile
+patch, enabling GSD's lifecycle guards: prompt-injection scanning, read-before-write hints,
+secret-read hard-blocks, commit-convention validation, and more.
 
+- Enabled by default; a lean fresh install can skip it with `--no-ghooks`. Upgrades always
+  (re)apply it.
 - All commands are routed through `hooks/dsh-gsd-suite/run.cjs`, which normalizes DSH's lowercase
   tool names (`read`, `write`, `bash`, …) to the PascalCase vocabulary GSD's guards expect —
   e.g. a model `read` of a `.env` file is hard-blocked (exit 2) with the guard's explanation text.
@@ -165,8 +170,8 @@ hard-blocks, commit-convention validation, and more.
    agent dispatch via `subagent` (role files read from `gsd-core/agents/` and injected into the
    subagent prompt), tool-name mapping (`Skill`→`skill`, `Bash`→`bash`, …), and handling for
    `@path` references / `$ARGUMENTS` (see *Limitations*).
-4. **Optionally** append the hooks-bridge mount block to each profile's `cordis.patch.yml`
-   (begin/end-marked, backed up before every write).
+4. **Append** the hooks-bridge mount block to each profile's `cordis.patch.yml` (on by default;
+   skipped with `--no-ghooks` on fresh installs; begin/end-marked, backed up before every write).
 
 ## What works — and the honest limitations
 
@@ -205,7 +210,7 @@ expectation until proven otherwise. Optional MCP tooling (Context7 etc.) works i
 
 1. The session skill catalog lists all 72 `gsd-*` skills; `/gsd-health` executes.
 2. Terminal: `gsd_run runtime-identity --raw` prints `@opengsd/gsd-core` and the target version
-   (with `--npm-bin`).
+   (the global CLI is installed by default; omitted only with `--no-npm-bin`).
 3. With the bridge installed **and DSH restarted**: asking the model to `read` a `.env` file is
    blocked with an explanation; a GSD update check appears at session start.
 4. `/gsd-new-project --auto` in a small test repo scaffolds a `.planning/` skeleton.
@@ -222,8 +227,8 @@ bash install-gsd-dsh.sh --uninstall
 - Same-named directories/files not managed by the script are **skipped with a warning** — never
   touched. The install phase behaves the same way: it aborts rather than overwrite unrelated
   content (`ERROR: refusing to overwrite`).
-- The npm global package installed by `--npm-bin` is outside the uninstall scope:
-  `npm uninstall -g @opengsd/gsd-core`.
+- The npm global package (installed by default; only skipped with `--no-npm-bin`) is outside the
+  uninstall scope: `npm uninstall -g @opengsd/gsd-core`.
 - GSD's own global state directory `~/.gsd` (if created) is left alone on purpose.
 
 ## Troubleshooting
@@ -231,16 +236,16 @@ bash install-gsd-dsh.sh --uninstall
 | Symptom | Fix |
 |---|---|
 | `ERROR: GSD v1.16+ requires Node >= 24` | Upgrade Node, or install an older tag: `GSD_VERSION=1.15.0 bash install-gsd-dsh.sh` |
-| `ERROR: GSD_VERSION is required for online installs` | Pin the version: `GSD_VERSION=1.16.0 bash install-gsd-dsh.sh --with-ghooks --npm-bin` (offline installs may omit it with `GSD_PACKAGE_DIR`) |
+| `ERROR: GSD_VERSION is required for online installs` | Pin the version: `GSD_VERSION=1.16.0 bash install-gsd-dsh.sh` (offline installs may omit it with `GSD_PACKAGE_DIR`) |
 | `ERROR: invalid GSD_VERSION '…'` | Use a semver like `1.17.0`; `v1.17.0` and `1.17.0-rc.1` are also accepted |
 | Skills don't appear in the session | Confirm `DSH_HOME` matches the home DSH actually uses; confirm `skills/gsd-*` files are in place; reopen the session (skill directories hot-reload in running sessions) |
 | Typing `/gsd-*` does nothing | That is DSH's user-invocable skill mechanism; ensure the skill directory is visible (above) and your DSH version supports `/name` invocation |
-| `gsd_run` not found | Install with `--npm-bin`, or call `node $DSH_HOME/gsd-core/bin/gsd-tools.cjs` directly; the script prints an npm-prefix hint at the end |
+| `gsd_run` not found | The global CLI is installed by default; if the script reported `'npm i -g' failed` (npm prefix not writable), call `node $DSH_HOME/gsd-core/bin/gsd-tools.cjs` directly or fix the prefix and re-run `npm i -g @opengsd/gsd-core@<version>` |
 | Hooks bridge has no effect | Restart `dsh web` (the patch mounts at process startup), then verify; check DSH startup logs for plugin warnings and restore the `.bak` patch if needed |
 | `ERROR: refusing to overwrite` | The target home already has same-named content not managed by this script; move it aside or use a different `DSH_HOME` |
 | `ERROR: fetched version X != requested Y` | Tag typo or npm cache issue; confirm the tag exists (e.g. `1.16.0`) |
 | Offline install fails | `GSD_PACKAGE_DIR` must be an npm-layout unpack artifact, not a git clone; a clone needs `npm install && npm run build:lib` first |
-| New hooks don't take effect after an upgrade | The hook list lands per GSD version; when a new GSD release adds hook events, re-run with `--with-ghooks` after updating this script |
+| New hooks don't take effect after an upgrade | The hook list lands per GSD version; when a new GSD release adds hook events, re-run this installer after updating it (the hooks patch is refreshed automatically by default) |
 
 ## Compatibility
 
