@@ -149,6 +149,20 @@ bridge_version() {
   return 1
 }
 
+# A profile's --dump-config output confirms the mount when it prints a
+# gsd-hooks-bridge row whose configPath points at this home's hooks file.
+# The dump re-serializes YAML scalars, so accept quoted and unquoted forms.
+cfg_row_ok() {
+  local out="$1" want="$DSH_HOME/gsd-hooks.dsh.json" ctx
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" | grep -q 'gsd-hooks-bridge' || return 1
+  ctx="$(printf '%s\n' "$out" | grep -A12 'gsd-hooks-bridge')"
+  printf '%s\n' "$ctx" | grep -qF "configPath: $want"    && return 0
+  printf '%s\n' "$ctx" | grep -qF "configPath: \"$want\"" && return 0
+  printf '%s\n' "$ctx" | grep -qF "configPath: '$want'"   && return 0
+  return 1
+}
+
 # Can this host enforce DSH's confined sandbox modes? Hooks run through
 # ctx.shell under the DEPLOYMENT default mode (sandbox-policy config:
 # process.env.DSH_PERMISSION_MODE ?? 'workspace-write'). On Linux the confined
@@ -715,7 +729,6 @@ if [ "$WITH_PATCH" = 1 ]; then
     note "this DSH version may not ship it — skipping patch (skills still work)."
     note "re-run with GSD_FORCE_HOOKS_PATCH=1 to force."
   else
-    CONFIG_PATH_LINE="        configPath: '$DSH_HOME/gsd-hooks.dsh.json'"
     if [ ! -f "$DSH_HOME/gsd-hooks.dsh.json" ]; then
       echo "WARNING: $DSH_HOME/gsd-hooks.dsh.json is missing — even a mounted bridge"
       echo "         would register zero hooks. It should have been written in 5/6."
@@ -735,119 +748,133 @@ if [ "$WITH_PATCH" = 1 ]; then
         : > "$prof"
         note "created $prof (profile '$(basename "$pdir")' had no patch layer)"
       fi
-      if grep -q 'gsd-hooks-bridge' "$prof"; then
-        # Any bridge block without BOTH canonical markers is foreign (a manual
-        # insert) or historic (an older installer or a !!js configPath): strip
-        # it and rewrite the canonical block so a re-run converges the patch.
-        NODE_RETRO="$(mktemp)"
-        cat > "$NODE_RETRO" <<'EOF'
+      # Converge every profile patch to exactly ONE byte-canonical bridge
+      # block. Marker presence alone is NOT proof of health: a partially
+      # edited block, a stale configPath written under a different DSH_HOME,
+      # or a duplicated hand-inserted row all carry the marker, and a YAML
+      # break anywhere in the file kills --dump-config (exit 1, empty stdout)
+      # silently. The rewriter validates the block's interior, drops
+      # needle-bearing foreign rows, and re-appends a fresh canonical block
+      # whenever anything differs.
+      NODE_RETRO="$(mktemp)"
+      cat > "$NODE_RETRO" <<'EOF'
 const fs = require('fs');
 const f = process.argv[2];
+const HOME = process.env.GSD_HOME;
 const B = '# GSD-DSH-bridge BEGIN', E = '# GSD-DSH-bridge END';
 const NEEDLE = 'gsd-hooks-bridge';
-let s = fs.readFileSync(f, 'utf8');
-const before = s;
-let changed = false;
-if (!(s.includes(B) && s.includes(E))) {
-  // remove foreign/historic entries: only top-level "- insert:" items whose
-  // span contains the needle (or bare needle lines), plus any GSD comment line
-  // clinging above them
-  let lines = s.split('\n');
-  for (let i = 0; i < lines.length; ) {
-    const isInsert = lines[i].trim() === '- insert:';
-    const nextTop = isInsert ? lines.findIndex((l, k) => k > i && /^- /.test(l)) : -1;
-    const span = isInsert ? lines.slice(i, nextTop === -1 ? lines.length : nextTop).join('\n') : '';
-    const targeted = isInsert ? span.includes(NEEDLE) : lines[i].includes(NEEDLE);
-    if (targeted) {
-      const endIdx = nextTop === -1 ? lines.length : nextTop;
-      let startIdx = i;
-      while (startIdx > 0) {
-        const t = lines[startIdx - 1].trim();
-        if (/^# GSD/.test(t) || /^# GSD-DSH-bridge/.test(t) || t === '') startIdx--;
-        else break;
-      }
-      lines.splice(startIdx, endIdx - startIdx);
-      changed = true;
-      i = startIdx;
-      continue;
-    }
-    i = isInsert ? (nextTop === -1 ? lines.length : nextTop) : i + 1;
+const CANON = [
+  '# GSD hooks bridge (added by install-gsd-dsh.sh)',
+  '- insert:',
+  '    - id: gsd-hooks-bridge',
+  "      name: '@deepseek-ai/dsh-hooks-claude-code'",
+  '      config:',
+  "        configPath: '" + HOME + "/gsd-hooks.dsh.json'",
+  "        pluginRoot: '" + HOME + "'",
+  '        defaultTimeoutMs: 300000',
+].join('\n');
+const src = fs.readFileSync(f, 'utf8');
+const lines = src.split('\n');
+function markerSpanEnd(i) {  // index just past the E line matching a B at i
+  for (let k = i + 1; k < lines.length; k++)
+    if (lines[k].trim() === E) return k + 1;
+  return lines.length;
+}
+let keptCanonical = false;
+const kept = [];
+for (let i = 0; i < lines.length; ) {
+  const t = lines[i].trim();
+  if (t === B) {
+    const end = markerSpanEnd(i);
+    const interior = lines.slice(i + 1, end - 1).join('\n').trim();
+    if (!keptCanonical && interior === CANON) {  // keep ONE canonical span verbatim
+      kept.push(...lines.slice(i, end));
+      keptCanonical = true;
+    }  // non-canonical marker spans are dropped and re-appended below
+    i = end;
+    continue;
   }
-  s = lines.join('\n');
+  if (t === E) { i++; continue; }  // stray END marker: drop
+  const isInsert = t === '- insert:';
+  let end = isInsert ? lines.findIndex((l, k) => k > i && /^- /.test(l)) : -1;
+  if (end === -1) end = isInsert ? lines.length : i + 1;
+  const span = lines.slice(i, end).join('\n');
+  if (span.includes(NEEDLE)) { i = end; continue; }  // foreign/duplicate row
+  kept.push(...lines.slice(i, end));
+  i = end;
 }
-if (!(s.includes(B) && s.includes(E))) {
-  s = s.replace(/\s*$/, '\n\n') + [
-    B,
-    '# GSD hooks bridge (added by install-gsd-dsh.sh)',
-    '- insert:',
-    '    - id: gsd-hooks-bridge',
-    "      name: '@deepseek-ai/dsh-hooks-claude-code'",
-    '      config:',
-    "        configPath: '" + process.env.GSD_HOME + "/gsd-hooks.dsh.json'",
-    "        pluginRoot: '" + process.env.GSD_HOME + "'",
-    '        defaultTimeoutMs: 300000',
-    E,
-  ].join('\n') + '\n';
-  changed = true;
-}
-if (changed) {
+let out = kept.join('\n').trim();
+if (!keptCanonical)
+  out = (out === '' ? '' : out + '\n\n') + B + '\n' + CANON + '\n' + E;
+if (out !== src.trim()) {
   fs.copyFileSync(f, f + '.bak.' + Date.now());
-  fs.writeFileSync(f, s);
+  fs.writeFileSync(f, out + '\n');
   console.log('bridge block rewritten to canonical form: ' + f);
 } else {
   console.log('bridge block already canonical: ' + f);
 }
 EOF
-        GSD_HOME="$DSH_HOME" node "$NODE_RETRO" "$prof"; rm -f "$NODE_RETRO"
-        note "bridge block checked in $prof"
-        PATCHED=1
-      else
-        cp "$prof" "$prof.bak.$(date +%s)"
-        {
-          echo ""
-          echo "# GSD-DSH-bridge BEGIN"
-          echo "# GSD hooks bridge (added by install-gsd-dsh.sh)"
-          echo "- insert:"
-          echo "    - id: gsd-hooks-bridge"
-          echo "      name: '@deepseek-ai/dsh-hooks-claude-code'"
-          echo "      config:"
-          echo "$CONFIG_PATH_LINE"
-          echo "        pluginRoot: '$DSH_HOME'"
-          echo "        defaultTimeoutMs: 300000"
-          echo "# GSD-DSH-bridge END"
-        } >> "$prof"
-        note "appended hooks bridge to $prof"
-        PATCHED=1
-      fi
+      GSD_HOME="$DSH_HOME" node "$NODE_RETRO" "$prof"; rm -f "$NODE_RETRO"
+      note "bridge block checked in $prof"
+      PATCHED=1
     done
     if [ "$PATCHED" != 1 ]; then
       note "no profile package.json found under $DSH_HOME/profiles — the bridge"
       note "was not mounted. Start DSH once, then re-run this script."
     fi
     # Post-flight verification: the mount is the point of this step, so a silent
-    # miss must not masquerade as success. Two checks per profile —
-    # 1. the insert survives the profile merge (--dump-config);
-    # 2. the bridge package actually imports from the profile tree (a stale
+    # miss must not masquerade as success. Three checks per profile —
+    # 1. --dump-config prints the bridge row from the profile layer; a YAML
+    #    break anywhere in the patch file kills the dump with exit 1 and an
+    #    EMPTY stdout, so on failure the stderr (the real reason) is printed,
+    #    not swallowed (cloud report 2026-11);
+    # 2. a second opinion without DSH_HOME set — a dsh wrapper that resolves a
+    #    different home makes this script write into the wrong place;
+    # 3. the bridge package resolves in the profile's own node_modules (a stale
     #    hoisted dsh-hook-protocol breaks startup imports).
     for pdir in $PROFILES_LIST; do
       pname="$(basename "$pdir")"
       if command -v dsh >/dev/null 2>&1; then
-        CFG_OUT="$(DSH_HOME="$DSH_HOME" dsh --profile "$pname" --dump-config 2>/dev/null || true)"
-        if printf '%s\n' "$CFG_OUT" | grep -q 'gsd-hooks-bridge' && \
-           printf '%s\n' "$CFG_OUT" | grep -A8 'gsd-hooks-bridge' | grep -qF "configPath: $DSH_HOME/gsd-hooks.dsh.json"; then
+        DUMP_ERR="$(mktemp)"
+        CFG_OUT=""
+        if CFG_OUT="$(DSH_HOME="$DSH_HOME" dsh --profile "$pname" --dump-config 2>"$DUMP_ERR")"; then
+          DUMP_EXIT=0
+        else
+          DUMP_EXIT=$?
+        fi
+        if cfg_row_ok "$CFG_OUT"; then
           HOOKS_OK=1
           note "verified: gsd-hooks-bridge in merged config of profile '$pname' (configPath OK)"
         else
-          echo "WARNING: gsd-hooks-bridge NOT confirmed in the merged config of profile '$pname'"
-          echo "         (row missing, or its configPath does not point at $DSH_HOME/gsd-hooks.dsh.json)."
-          echo "         manual fix — append/replace in $pdir/cordis.patch.yml:"
-          echo "           - insert:"
-          echo "               - id: gsd-hooks-bridge"
-          echo "                 name: '@deepseek-ai/dsh-hooks-claude-code'"
-          echo "                 config:"
-          echo "                   configPath: '$DSH_HOME/gsd-hooks.dsh.json'"
-          echo "                   pluginRoot: '$DSH_HOME'"
+          echo "WARNING: gsd-hooks-bridge NOT confirmed in the config dump of profile '$pname'"
+          echo "         (dump exit=$DUMP_EXIT, DSH_HOME=$DSH_HOME)."
+          if [ -s "$DUMP_ERR" ]; then
+            echo "         dsh stderr — the actual reason (first 12 lines):"
+            head -12 "$DUMP_ERR" | sed 's/^/           | /'
+          fi
+          echo "         what the patch file currently contains:"
+          grep -nE 'gsd-hooks-bridge|GSD-DSH-bridge|GSD-DSH-sandbox|sandbox-policy' \
+            "$pdir/cordis.patch.yml" 2>/dev/null | head -12 | sed 's/^/           | /'
+          CFG_OUT2="$(dsh --profile "$pname" --dump-config 2>/dev/null || true)"
+          if printf '%s\n' "$CFG_OUT2" | grep -A12 'gsd-hooks-bridge' | grep -q 'configPath:' && \
+             ! cfg_row_ok "$CFG_OUT2"; then
+            echo "         NOTE: without the DSH_HOME env the row IS present — but its"
+            echo "         configPath points at a DIFFERENT home than $DSH_HOME, so the dsh"
+            echo "         on this host resolves another home and this script wrote the"
+            echo "         patch into the wrong place. Locate the real one via:"
+            echo "           dsh --profile $pname --dump-config | grep cordis.patch.yml"
+            echo "         then re-run with that DSH_HOME (or export DSH_HOME for dsh web)."
+          else
+            echo "         manual fix — append/replace in $pdir/cordis.patch.yml:"
+            echo "           - insert:"
+            echo "               - id: gsd-hooks-bridge"
+            echo "                 name: '@deepseek-ai/dsh-hooks-claude-code'"
+            echo "                 config:"
+            echo "                   configPath: '$DSH_HOME/gsd-hooks.dsh.json'"
+            echo "                   pluginRoot: '$DSH_HOME'"
+          fi
         fi
+        rm -f "$DUMP_ERR"
       else
         note "dsh CLI not on PATH — skipped merged-config check ($pname)."
         note "restart DSH, then verify: dsh --profile $pname --dump-config | grep gsd-hooks-bridge"
